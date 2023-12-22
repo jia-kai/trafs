@@ -1,0 +1,288 @@
+from ..opt.shared import (
+    ProximalGradOptimizable, StronglyConvexOptimizable, StronglyConvexParams)
+from .utils import make_stable_rng, UnconstrainedFuncSubDiffHelper
+
+import attr
+import numpy as np
+import numpy.typing as npt
+import scipy.special as sps
+
+import typing
+
+# inplace functions
+def mul_(x, y):
+    return np.multiply(x, y, out=x)
+
+def add_(x, y):
+    return np.add(x, y, out=x)
+
+class L1RegularizedOptimizable(ProximalGradOptimizable):
+    """min f(x) + lam ||x||_1 where f is smooth"""
+
+    lam: float
+
+    @attr.frozen
+    class SubDiff(ProximalGradOptimizable.SubDiff):
+        _helper = UnconstrainedFuncSubDiffHelper()
+
+        x0: npt.NDArray
+        """the point where the subgradient is evaluated"""
+
+        g0: npt.NDArray
+        """the gradient of f at x0"""
+
+        pen: npt.NDArray
+        """the penalty term at x0 (i.e., lam * abs(x0))"""
+
+        lam: float
+        """the regularization parameter"""
+
+        def _subg1(self, slack, norm_bound):
+            """subgradient of lam*l1(x) using the first method"""
+            sn = np.sqrt(self.x0.size)
+
+            y = self.pen[self.pen > slack / (2 * sn)]
+            if y.size:
+                norm_bound = min(y.min(), norm_bound)
+            yield norm_bound    # range of validity (i.e., D_eps f(x) in paper)
+
+            # mask of selected nonsmooth coordinates
+            yield self.pen < norm_bound
+
+        def _subg2(self, slack, norm_bound):
+            """subgradient of lam*l1(x) using the second method"""
+            st_idx = np.argsort(self.pen)
+            st_val = self.pen[st_idx]
+            cum = np.cumsum(st_val)
+            cum_i = np.searchsorted(cum, slack / 2, side='right')
+            # cum[cum_i] > slack / 2 >= cum[cum_i - 1]
+
+            # range of validity
+            if cum_i < len(cum):
+                yield min(st_val[cum_i], norm_bound)
+            else:
+                yield norm_bound
+
+            # mask of selected nonsmooth coordinates
+            j = np.searchsorted(st_val, norm_bound, side='right')
+            p = min(j, cum_i)
+            mask = np.zeros_like(self.pen, dtype=bool)
+            mask[st_idx[:p]] = True
+            yield mask
+
+        def _get_subgrad(self, slack, norm_bound):
+            meth1_it = self._subg1(slack, norm_bound)
+            meth2_it = self._subg2(slack, norm_bound)
+
+            valid_range1 = next(meth1_it)
+            valid_range2 = next(meth2_it)
+
+            if valid_range1 >= valid_range2:
+                meth_it = meth1_it
+            else:
+                meth_it = meth2_it
+
+            lam = self.lam
+            sel = np.where(next(meth_it),
+                           np.array(lam, dtype=self.pen.dtype),
+                           np.array(0, dtype=self.pen.dtype))
+            g = add_(mul_(np.sign(self.x0), (lam - sel)), self.g0)
+            return g - sel, g + sel
+
+        def reduce_trafs(
+                self,
+                subg_slack: float, df_lb_thresh: float, norm_bound: float,
+                state: dict):
+            assert norm_bound > 0
+            glow, ghigh = self._get_subgrad(subg_slack, norm_bound)
+            return self._helper.reduce_grad_range(glow, ghigh, df_lb_thresh,
+                                                  norm_bound)
+
+        def take_arbitrary(self):
+            return self.g0 + np.sign(self.x0) * self.lam
+
+    def __init__(self, lam: float):
+        self.lam = float(lam)
+
+    def eval(self, x: npt.NDArray, *, need_grad: bool=False) -> typing.Union[
+            float, tuple[float, "LassoRegression.SubDiff"]]:
+        pen = self.lam * np.abs(x)
+        if not need_grad:
+            return self.prox_f(x, need_grad=False) + pen.sum()
+        else:
+            f, grad = self.prox_f(x, need_grad=True)
+            return f + pen.sum(), self.SubDiff(x, grad, pen, self.lam)
+
+    def eval_batch(self, x: npt.NDArray) -> npt.NDArray:
+        pen = self.lam * np.linalg.norm(x, axis=1, ord=1)
+        return self.prox_f_batch(x) + pen
+
+    def prox_g(self, x: npt.NDArray):
+        return self.lam * np.linalg.norm(x, ord=1)
+
+    def prox_minx(self, y: npt.NDArray, L: float) -> npt.NDArray:
+        t = self.lam / L
+        return np.sign(y) * np.maximum(np.abs(y) - t, 0.)
+
+
+class LassoRegression(L1RegularizedOptimizable, StronglyConvexOptimizable):
+    """min 1/2m ||Ax - b||^2 + lam ||x||_1"""
+    A: npt.NDArray
+    b: npt.NDArray
+
+    def __init__(self, A: npt.NDArray, b: npt.NDArray, lam: float, x0=None):
+        super().__init__(lam)
+        assert A.ndim == 2, A.shape
+        m, n = A.shape
+        assert b.shape == (m, ), b.shape
+        if x0 is None:
+            x0 = np.zeros(n)
+        else:
+            assert x0.shape == (n,), x0.shape
+        self.A = A
+        self.b = b
+        self.x0 = x0
+
+    def prox_f(self, x: npt.NDArray, *, need_grad: bool = False):
+        A = self.A
+        m, _ = A.shape
+        Ax = A @ x
+        res = Ax - self.b
+        f = (1 / (m*2)) * np.dot(res, res)
+        if not need_grad:
+            return f
+        else:
+            return f, (1 / m) * (A.T @ res)
+
+    def prox_f_batch(self, x: npt.NDArray) -> npt.NDArray:
+        assert x.ndim == 2
+        A = self.A
+        m, _ = A.shape
+        AxT = x @ A.T  # (batch, m)
+        res = AxT - self.b[np.newaxis]
+        res2 = np.square(res, out=res)
+        return (1 / (m*2)) * np.sum(res2, axis=1)
+
+    def eval_cvx_params(self) -> StronglyConvexParams:
+        A = self.A
+        m, n = A.shape
+        R = np.sqrt(n)  # a rough estimation
+        eig = np.linalg.eigvalsh(A.T @ A) / m
+        assert eig[0] <= eig[-1]
+        L = eig[-1] * R
+        alpha = np.abs(eig[0])
+        beta = eig[-1]
+        return StronglyConvexParams(float(self.eval(self.x0)), R, L, alpha, beta)
+
+    @classmethod
+    def gen_random(cls, m, n, lam,
+                   sparsity=0.6, noise=0.05,
+                   rng: typing.Optional[np.random.Generator] = None
+                   ) -> tuple["LassoRegression", npt.NDArray]:
+        """
+        Generate a random Lasso problem
+        :return: (problem, xtrue)
+        """
+        if rng is None:
+            rng = make_stable_rng(cls)
+        A = rng.standard_normal((m, n))
+        xtrue = rng.standard_normal(n)
+        xtrue *= rng.uniform(size=n) >= sparsity
+        b = A @ xtrue
+        noise_s = noise * np.abs(b).mean()
+        b += rng.normal(scale=noise_s, size=m)
+        return cls(A, b, lam), xtrue
+
+
+class LassoClassification(L1RegularizedOptimizable):
+    """multi-class classification with L1 regularization and cross-entropy
+    loss
+
+    Loss = -1/m (log sum exp (A_i x) - (A_i x)_{y_i}) + lam ||x||_1
+    """
+    A: npt.NDArray
+    b: npt.NDArray
+    nr_class: int
+
+    _m_arange: npt.NDArray
+
+    def __init__(self, A: npt.NDArray, b: npt.NDArray, lam: float, x0=None):
+        super().__init__(lam)
+        assert A.ndim == 2, A.shape
+        m, n = A.shape
+        assert b.shape == (m, ), b.shape
+        assert b.dtype == np.int32, b.dtype
+        nr_class = b.max() + 1
+        self.nr_class = nr_class
+        x_size = n * nr_class
+        if x0 is None:
+            x0 = np.zeros(x_size)
+        else:
+            assert x0.shape == (x_size,), (x0.shape, (n, nr_class))
+        self.A = A
+        self.b = b
+        self.x0 = x0
+        self._m_arange = np.arange(m)
+
+    def prox_f(self, x: npt.NDArray, *, need_grad: bool = False):
+        A = self.A
+        m, n = A.shape
+        Ax = A @ x.reshape(n, self.nr_class)    # (m, nr_class)
+        ce = (1/m) * (sps.logsumexp(Ax, axis=1) -
+                       Ax[self._m_arange, self.b]).sum()
+        if need_grad:
+            # d[i, j, k] = Ax[i, k] - Ax[i, j]
+            d = Ax[:, np.newaxis, :] - Ax[:, :, np.newaxis]
+            # g0 is diff(loss, Ax)
+            g0 = (1 / m) / np.exp(d).sum(axis=2)    # (m, nr_class)
+            g0[self._m_arange, self.b] -= 1 / m
+            grad = A.T @ g0
+            return ce, grad.flatten()
+        return ce
+
+    def prox_f_batch(self, x: npt.NDArray) -> npt.NDArray:
+        batch, _ = x.shape
+        A = self.A
+        m, n = A.shape
+        x = x.reshape(batch, n, self.nr_class)
+        # Ax = np.einsum('mn, bnc -> bmc', A, x) # too slow
+        xt = x.transpose((1, 0, 2)).reshape(n, batch * self.nr_class)
+        Ax = (A @ xt).reshape(m, batch, self.nr_class)
+        Ax_b = Ax[self._m_arange, :, self.b]    # (m, batch)
+        ce = (1/m) * (sps.logsumexp(Ax, axis=2) - Ax_b).sum(axis=0)
+        return ce
+
+    @classmethod
+    def gen_random(cls, m, n, nr_class, lam,
+                   sparsity=0.6, noise=0.05,
+                   rng: typing.Optional[np.random.Generator] = None
+                   ) -> tuple["LassoClassification", npt.NDArray]:
+        """:return: (problem, xtrue)"""
+        if rng is None:
+            rng = make_stable_rng(cls)
+        xtrue = np.empty((n, nr_class), dtype=np.float64)
+        xtrue[:, 0] = rng.standard_normal(n) * (rng.uniform(size=n) < sparsity)
+        min_angle_cos = np.cos(np.pi / nr_class)
+        for i in range(1, nr_class):
+            # ensure that they have enough pairwise distance
+            while True:
+                xi = rng.standard_normal(n) * (rng.uniform(size=n) < sparsity)
+                len_xi = np.linalg.norm(xi)
+                for j in range(i):
+                    len_xj = np.linalg.norm(xtrue[:, j])
+                    if np.abs(np.dot(xi, xtrue[:, j])) > (
+                            min_angle_cos * len_xi * len_xj):
+                        break
+                else:
+                    xtrue[:, i] = xi
+                    break
+
+        coeff = rng.exponential(scale=1, size=(m, nr_class))
+        b = rng.integers(nr_class, size=m, dtype=np.int32)
+        coeff[np.arange(m), b] = 0
+        coeff *= 0.1 / coeff.sum(axis=1, keepdims=True)
+        coeff[np.arange(m), b] = 1
+        A = coeff @ xtrue.T
+        noise_s = noise * np.abs(A).mean()
+        A += rng.normal(scale=noise_s, size=A.shape)
+        return cls(A, b, lam), xtrue

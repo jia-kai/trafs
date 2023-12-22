@@ -1,0 +1,6 @@
+[submodule "third-party/MPBNGCInterface.jl"]
+	path = third-party/MPBNGCInterface.jl
+	url = git@github.com:jia-kai/MPBNGCInterface.jl.git
+[submodule "third-party/piqp"]
+	path = third-party/piqp
+	url = git@github.com:jia-kai/piqp.git

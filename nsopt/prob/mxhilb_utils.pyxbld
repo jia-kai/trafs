@@ -1,0 +1,1 @@
+from nsopt.utils import default_make_ext_for_pyx as make_ext
