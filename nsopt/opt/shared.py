@@ -6,7 +6,10 @@ import typing
 from abc import ABCMeta, abstractmethod
 
 @attrs.frozen
-class StronglyConvexParams:
+class LipschitzConstants:
+    """Lipschitz constants (and other related information) of a convex
+    function"""
+
     D: float
     """lower bound of initial optimality gap"""
 
@@ -159,11 +162,11 @@ class Optimizable(metaclass=ABCMeta):
         """projection onto the feasible set"""
 
 
-class StronglyConvexOptimizable(Optimizable):
-    """strongly convex problems with known parameters"""
+class KnownLipschitzOptimizable(Optimizable):
+    """problems with known Lipschitz constants"""
 
     @abstractmethod
-    def eval_cvx_params(self) -> StronglyConvexParams:
+    def eval_cvx_params(self) -> LipschitzConstants:
         """optional implementation to compute parameters for strongly convex
         functions"""
 

@@ -1,8 +1,9 @@
 import numpy as np
 
-import contextlib
-from pathlib import Path
 from distutils.extension import Extension
+from pathlib import Path
+import contextlib
+import time
 
 @contextlib.contextmanager
 def setup_pyx_import():
@@ -29,3 +30,18 @@ def default_make_ext_for_pyx(modname, pyxfilename):
         language='c++',
         define_macros=[("NPY_NO_DEPRECATED_API", "NPY_1_7_API_VERSION")],
     )
+
+class CPUTimer:
+    """get the CPU time used by the current process"""
+    _t0: int
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        """reset the timer"""
+        self._t0 = time.process_time_ns()
+
+    def elapsed(self) -> float:
+        """return the elapsed time since previous reset in seconds"""
+        return (time.process_time_ns() - self._t0) / 1e9

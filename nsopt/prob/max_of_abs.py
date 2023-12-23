@@ -1,6 +1,6 @@
-from ..opt.shared import (UnconstrainedOptimizable, StronglyConvexOptimizable,
-                          StronglyConvexParams, TRAFSStep)
-from .utils import UnconstrainedFuncSubDiffHelper
+from ..opt.shared import (UnconstrainedOptimizable, KnownLipschitzOptimizable,
+                          LipschitzConstants, TRAFSStep)
+from .utils import UnconstrainedFuncSubDiffHelper, ClarabelSOCPSolver
 from ..utils import setup_pyx_import
 
 import numpy as np
@@ -10,7 +10,7 @@ import attrs
 with setup_pyx_import():
     from .max_of_abs_utils import max_of_abs_subd
 
-class MaxOfAbs(UnconstrainedOptimizable, StronglyConvexOptimizable):
+class MaxOfAbs(UnconstrainedOptimizable, KnownLipschitzOptimizable):
     """Test problem taken from the paper Quasi-monotone Subgradient Methods for
     Nonsmooth Convex Minimization:
 
@@ -20,8 +20,8 @@ class MaxOfAbs(UnconstrainedOptimizable, StronglyConvexOptimizable):
     x0: npt.NDArray
 
     @attrs.frozen
-    class SubDiff(StronglyConvexOptimizable.SubDiff):
-        _helper = UnconstrainedFuncSubDiffHelper(f_lb_norm_bound=4)
+    class SubDiff(KnownLipschitzOptimizable.SubDiff):
+        _helper = UnconstrainedFuncSubDiffHelper()
 
         fval: np.float64
         x0: np.float64
@@ -49,11 +49,13 @@ class MaxOfAbs(UnconstrainedOptimizable, StronglyConvexOptimizable):
                 return self._helper.reduce_with_min_grad(g, df_lb_thresh,
                                                          norm_bound)
 
-            # the QP solver has some numerical issues when n = 16; use the SOCP
-            # instead
+            # the QP and mosek solvers have some numerical issues near n = 16;
+            # Mosek 10.1.21 triggers an assertion (primal < dual) when n=20
+            # Clarabel seems more stable
             return self._helper.reduce_from_cvx_hull_socp(
-                G, df_lb_thresh, norm_bound, state)
-
+                G, df_lb_thresh, norm_bound, state,
+                solver_factory=ClarabelSOCPSolver
+            )
 
     def __init__(self, n: int):
         self.x0 = np.ones(n, dtype=np.float64)
@@ -73,11 +75,14 @@ class MaxOfAbs(UnconstrainedOptimizable, StronglyConvexOptimizable):
         abs1 = np.abs(x[:, 1:] - 2*x[:, :-1])
         return np.maximum(abs0, abs1.max(axis=1))
 
-    def eval_cvx_params(self) -> StronglyConvexParams:
+    def eval_cvx_params(self) -> LipschitzConstants:
         n = self.x0.size
-        return StronglyConvexParams(
+        return LipschitzConstants(
             D=self.eval(self.x0),
             R=np.sqrt(n),
             L=np.sqrt(5),
             alpha=0,
             beta=0)
+
+    def __repr__(self):
+        return f'MaxOfAbs(n={self.x0.size})'

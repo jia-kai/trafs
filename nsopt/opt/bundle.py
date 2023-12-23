@@ -2,12 +2,12 @@
 
 from .shared import OptimizationResult, UnconstrainedOptimizable, Optimizable
 from ..prob.simplex import SimplexConstrainedOptimizable
+from ..utils import CPUTimer
 
 import attrs
 import numpy as np
 
 import abc
-import time
 import uuid
 import tempfile
 import os
@@ -107,11 +107,11 @@ class BundleSolver:
             assert mm == 1 and f.size == 1 and g.size == n and n == obj.x0.size
             f[0] = fval
             g[:, 0] = grad
-            iter_times.append(time.time() - time_start)
+            iter_times.append(timer.elapsed())
 
-        time_start = None
+        timer = CPUTimer()
         def work():
-            nonlocal time_start, fval_hist, iter_times
+            nonlocal fval_hist, iter_times
             jl.eval(JULIA_TEMPLATE.format(
                 opts=','.join(f'{k} => {v}' for k, v in opts.items()),
                 pymodule=self.__module__,
@@ -121,9 +121,9 @@ class BundleSolver:
                 fn = jl.run_simplex
             else:
                 fn = jl.run
-            time_start = time.time()
+            timer.reset()
             x, fval_lib, ierr, stats = fn(obj.x0.size, obj.x0)
-            total_time = time.time() - time_start
+            total_time = timer.elapsed()
 
             # parse the log to extract function values at each iteration
             fval_hist = np.array(fval_hist)

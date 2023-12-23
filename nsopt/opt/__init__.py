@@ -43,18 +43,21 @@ class MethodFactory:
                 ),
     }
 
-    def __init__(self, problem_class):
+    def __init__(self, problem_class: typing.Optional[type]):
         """:param problem_class: the class of the optimization problem, one of
-        the classes defined in ``.shared``"""
+        the classes defined in ``.shared`` to filter available methods"""
+        if problem_class is None:
+            self.methods = self.METHODS_ALL
+        else:
+            self.methods = {
+                k: v for k, v in self.METHODS_ALL.items()
+                if issubclass(problem_class, v[0].PROBLEM_CLASS)
+            }
 
-        self.methods = {
-            k: v for k, v in self.METHODS_ALL.items()
-            if issubclass(problem_class, v[0].PROBLEM_CLASS)
-        }
-
-    def setup_parser(self, parser: argparse.ArgumentParser):
+    def setup_parser(self, parser: argparse.ArgumentParser,
+                     default_max_iters=5000):
         """add method arguments to parser"""
-        parser.add_argument('--max-iters', type=int, default=5000)
+        parser.add_argument('--max-iters', type=int, default=default_max_iters)
         parser.add_argument('--eps-term', type=float, default=1e-6,
                             help='eps for termination')
         parser.add_argument('--supress', nargs='*', default=[],
@@ -74,12 +77,11 @@ class MethodFactory:
                 continue
             if not isinstance(obj, cls.PROBLEM_CLASS):
                 continue
-            s = 'Running {}...'
-            print(s.format(k).ljust(len(s)+5), end='', flush=True)
+            print(f'Running {k} on {obj} ...', flush=True)
             solver = cls(**mkarg(args))
             r = solver.solve(obj)
             results[k] = r
-            print(f' iters={r.iters} time={r.time:.3f}s'
+            print(f'{k}: f={r.fval:.5g} iters={r.iters} time={r.time:.3f}s'
                   f' optimal={r.optimal} ls={r.ls_tot_iters}',
                   flush=True)
         return results

@@ -1,5 +1,5 @@
-from ..opt.shared import UnconstrainedOptimizable, TRAFSStep
-from .utils import UnconstrainedFuncSubDiffHelper
+from ..opt.shared import UnconstrainedOptimizable, LipschitzConstants, TRAFSStep
+from .utils import UnconstrainedFuncSubDiffHelper, mosek, print_once
 from ..utils import setup_pyx_import
 
 import numpy as np
@@ -20,7 +20,10 @@ class GeneralizedMXHILB(UnconstrainedOptimizable):
 
     @attrs.frozen
     class SubDiff(UnconstrainedOptimizable.SubDiff):
-        _helper = UnconstrainedFuncSubDiffHelper()
+        _helper = UnconstrainedFuncSubDiffHelper(
+            qp_eps=1e-3,
+            qp_iters=200,
+        )
 
         fval: float
         recips: npt.NDArray
@@ -44,9 +47,14 @@ class GeneralizedMXHILB(UnconstrainedOptimizable):
                 return self._helper.reduce_with_min_grad(
                     G[:, 0], df_lb_thresh, norm_bound)
 
-            # the SOCP solver is much slower than the QP solver (perhaps a dense
-            # solver can be better)
-            return self._helper.reduce_from_cvx_hull_qp(
+            # MOSEK is faster than PIQP
+            # PIQP faster than Clarabel
+            if mosek is None:
+                print_once('Use PIQP to solve min norm grad')
+                return self._helper.reduce_from_cvx_hull_qp(
+                    G, df_lb_thresh, norm_bound, state)
+            print_once('Use MOSEK to solve best dx')
+            return self._helper.reduce_from_cvx_hull_socp(
                 G, df_lb_thresh, norm_bound, state)
 
 
@@ -68,3 +76,15 @@ class GeneralizedMXHILB(UnconstrainedOptimizable):
     def eval_batch(self, x: npt.NDArray):
         comp = mxhilb_comp_batch(self._recips, x)
         return np.abs(comp).max(axis=0)
+
+    def eval_cvx_params(self) -> LipschitzConstants:
+        n = self.x0.size
+        return LipschitzConstants(
+            D=self.eval(self.x0),
+            R=np.sqrt(n),
+            L=np.linalg.norm(self._recips[:n], ord=2),
+            alpha=0,
+            beta=0)
+
+    def __repr__(self):
+        return f'MXHILB(n={self.x0.size})'

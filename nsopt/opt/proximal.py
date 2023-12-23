@@ -1,15 +1,17 @@
-"""the accelerated proximal gradient method"""
-# see https://sci-hub.se/https://doi.org/10.1137/080716542
-
 from .shared import OptimizationResult, ProximalGradOptimizable
+from ..utils import CPUTimer
 
 import attrs
 import numpy as np
 
-import time
-
 @attrs.define(kw_only=True)
 class ProximalGradSolver:
+    """the accelerated proximal gradient method; see Beck, A., & Teboulle, M.
+    (2009). A Fast Iterative Shrinkage-Thresholding Algorithm for Linear Inverse
+    Problems. SIAM Journal on Imaging Sciences, 2(1), 183–202. doi:
+    10.1137/080716542
+    """
+
     PROBLEM_CLASS = ProximalGradOptimizable
 
     max_iters: int
@@ -25,7 +27,6 @@ class ProximalGradSolver:
 
     def solve(self, obj: ProximalGradOptimizable) -> OptimizationResult:
         """solve the problem"""
-        time_start = time.time()
         fval_hist = []
         iter_times = []
         xk = obj.x0.copy()
@@ -37,6 +38,7 @@ class ProximalGradSolver:
             prox_old = xk
 
         optimal = False
+        timer = CPUTimer()
         for _ in range(self.max_iters):
             fval, grad = obj.prox_f(xk, need_grad=True)
             fval_hist.append(fval + obj.prox_g(xk))
@@ -52,7 +54,7 @@ class ProximalGradSolver:
                 if not np.isfinite(L):
                     # optimal solution found
                     optimal = True
-                    iter_times.append(time.time() - time_start)
+                    iter_times.append(timer.elapsed())
                     break
 
             if optimal:
@@ -64,7 +66,7 @@ class ProximalGradSolver:
                 prox_old = prox_new
                 tk = tnew
             xk = xnew
-            iter_times.append(time.time() - time_start)
+            iter_times.append(timer.elapsed())
 
         assert ls_tot_iters > 0, 'initial L is too large'
         return OptimizationResult(
@@ -75,5 +77,5 @@ class ProximalGradSolver:
             iter_times=np.array(iter_times),
             iters=self.max_iters,
             ls_tot_iters=ls_tot_iters,
-            time=time.time() - time_start,
+            time=timer.elapsed(),
         )

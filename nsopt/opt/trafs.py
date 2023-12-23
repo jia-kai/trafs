@@ -1,12 +1,11 @@
 from .shared import Optimizable, OptimizationResult, TRAFSStep
-from ..utils import setup_pyx_import
+from ..utils import setup_pyx_import, CPUTimer
 with setup_pyx_import():
     from .trafs_utils import RotationBuffer
 
 import attrs
 import numpy as np
 
-import time
 import typing
 import enum
 import copy
@@ -101,7 +100,7 @@ class TRAFSSolver:
             x=xk, fval=obj.eval(xk), fval_hist=np.array(runtime.fval_hist),
             iter_times=np.array(runtime.iter_times),
             iters=runtime.iters, ls_tot_iters=runtime.ls_tot_iters,
-            time=time.time() - runtime.time_start
+            time=runtime.timer.elapsed(),
         )
 
     def logmsg(self, msg):
@@ -164,7 +163,7 @@ class TRAFSRuntime:
     """direction of eps tuning: -1 for decrease, 1 for increase, 0 for random"""
 
     fval_lb: float = -np.inf
-    time_start: float = attrs.field(factory=time.time)
+    timer: CPUTimer = attrs.field(factory=CPUTimer)
     ls_tot_iters: int = 0
     iters: int = 0
     iter_times: list[float] = attrs.field(factory=list)
@@ -255,7 +254,7 @@ class TRAFSRuntime:
         try:
             return self._do_next_iter(xk, fval, sub_diff)
         finally:
-            self.iter_times.append(time.time() - self.time_start)
+            self.iter_times.append(self.timer.elapsed())
 
     def _tune_subg_slack(
             self,

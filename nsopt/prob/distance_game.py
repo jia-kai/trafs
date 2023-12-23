@@ -273,6 +273,9 @@ class DistanceGame(SimplexConstrainedOptimizable):
         comp += kl
         return comp.max(axis=1)
 
+    def __repr__(self):
+        return f'DistanceGame(n={self.n}, m={self.m}, k={self.k})'
+
     @classmethod
     def gen_random(cls, n: int,
                    m: typing.Optional[int]=None,
@@ -321,6 +324,7 @@ class DistanceGame(SimplexConstrainedOptimizable):
             m = sum(math.comb(n - 1, i) for i in range(k))
             p = 1 - m / (2 ** (n - 1))
             print(f'{k=} {n=}: p(B_i contains origin) = {p}')
+
 
 if __name__ == '__main__':
     DistanceGame.print_info()

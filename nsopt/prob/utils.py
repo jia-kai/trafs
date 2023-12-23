@@ -1,29 +1,28 @@
 from ..opt.shared import TRAFSStep
 from .simplex import projection_simplex
 
-import abc
 import attrs
 import numpy as np
 import numpy.typing as npt
 import scipy.sparse as sp
-import sys
 
+import abc
+import os
+import sys
 import typing
 
-try:
-    # this is a fork of PIQP that supports the TRAFS objective (so we can set a
-    # reduced accuracy parameter)
-    import piqptr as piqp
-except ImportError:
-    piqp = None
-try:
-    import clarabel
-except ImportError:
-    clarabel = None
+# this is a fork of PIQP that supports the TRAFS objective (so we can set a
+# reduced accuracy parameter)
+import piqptr as piqp
+import clarabel
 try:
     import mosek
+    print(f'Mosek version: {mosek.Env.getversion()}')
 except ImportError:
     mosek = None
+if os.getenv('NSOPT_USE_CLARABEL'):
+    mosek = None
+
 
 DenseOrSparse = typing.Union[npt.NDArray, sp.csc_matrix]
 
@@ -32,6 +31,11 @@ def make_stable_rng(cls) -> np.random.Generator:
     seq = list(map(ord, cls.__name__))
     return np.random.default_rng(seq)
 
+def print_once(msg: str, *, _done: set[str] = set()) -> None:
+    if msg in _done:
+        return
+    print(msg)
+    _done.add(msg)
 
 class SOCPSolverBase(metaclass=abc.ABCMeta):
     """base class for SOCP solvers to solve min u s.t. constraints(x, u)"""
@@ -93,8 +97,10 @@ class SOCPSolverBase(metaclass=abc.ABCMeta):
         # iteration may have a different shape, which requires rebulding the
         # model and recompiling)
         if mosek is not None:
+            print_once('Use MOSEK as the SOCP solver')
             return MosekSOCPSolver(dim=dim)
         if clarabel is not None:
+            print_once('Use Clarabel as the SOCP solver')
             return ClarabelSOCPSolver(dim=dim)
         raise RuntimeError('no SOCP solver is available'
                            ' (need mosek or clarabel)')
@@ -241,9 +247,6 @@ class MosekSOCPSolver(SOCPSolverBase):
     dim: int
     """dimension of the step vector (num of variables is ``dim + 1``)"""
 
-    max_iter: int = 100
-    """max number of iterations"""
-
     verbose: bool = False
     """whether to print verbose output of the solver"""
 
@@ -267,7 +270,7 @@ class MosekSOCPSolver(SOCPSolverBase):
 
         ip = mosek.iparam
         task.putintparam(ip.num_threads, 1)
-        task.putintparam(ip.intpnt_max_iterations, self.max_iter)
+
         if self.verbose:
             for i in range(self.dim):
                 task.putvarname(i, f'x{i}')
@@ -407,8 +410,7 @@ class MosekSOCPSolver(SOCPSolverBase):
         u = task.getprimalobj(mosek.soltype.itr)
         np.testing.assert_allclose(xx[-1], task.getprimalobj(mosek.soltype.itr))
         dual_obj = task.getdualobj(mosek.soltype.itr)
-        # mosek may return a dual larger than the primal
-        assert dual_obj <= u + 1e-6, (dual_obj, u, dual_obj - u)
+        assert dual_obj <= u + 1.5e-6, (dual_obj, u, dual_obj - u)
         dual_obj = min(dual_obj, u)
 
         if status == c.ok:
@@ -427,14 +429,13 @@ class UnconstrainedFuncSubDiffHelper:
     subdifferential for unconstrained problems. The problem is essentially
     finding the minimum norm subgradient."""
 
-    box_size: float = 10.0
-    """max coordinate of the box; although the problem is unconstrained, we
-    still assume that max abosulte value of each coordinate is bounded. A
-    solution is optimal if it can not be improved within a ball of radius 1.
-    """
+    df_g_norm_bound_thresh: float = 1e-4
+    """maximum norm bound for the current lower bound of df to be considered as
+    global"""
 
-    f_lb_norm_bound: float = 1
-    """L2 norm bound to compute the lower bound of the objective delta"""
+    f_lb_norm_bound_mul: float = 1
+    """L2 norm bound multiplier (multiplied with sqrt(n)) to compute the lower
+    bound of the objective delta"""
 
     qp_eps: float = 1e-4
     """tolerance for the QP solver"""
@@ -481,26 +482,23 @@ class UnconstrainedFuncSubDiffHelper:
             dx_dg = dx_dg_fn(dx)
         # min_d max_g d@g = max_g -|g| = -min_g |g| >= -gc_norm even if gc is
         # not the global minimum
-        df_l = -gc_norm * self.f_lb_norm_bound
         if dx_dg >= 0:
             return TRAFSStep.make_zero(gc.size, False)
-        if norm_bound >= 1:
-            df_l = min(-np.abs(gc).sum() * self.box_size, df_l)
-            df_is_g = True
-        else:
-            # consider the df bound within unit ball as a global bound if the
-            # norm bound is small enough
-            df_is_g = norm_bound <= 1e-3
+        df_l = -gc_norm * self.f_lb_norm_bound_mul * np.sqrt(gc.size)
+        df_is_g = norm_bound <= self.df_g_norm_bound_thresh
         return TRAFSStep(dx, dx_dg, df_l, df_is_g)
 
     def reduce_from_cvx_hull_socp(
             self, G: DenseOrSparse, df_lb_thresh: float, norm_bound: float,
-            state: dict) -> TRAFSStep:
+            state: dict,
+            solver_factory:
+                typing.Callable[..., SOCPSolverBase]=SOCPSolverBase.make
+        ) -> TRAFSStep:
         """Reduce to a subgradient given the convex hull. The vertices of the
         convex hull are columns of ``G``. Use an SOCP solver to compute the
         result.
         """
-        norm_bound = min(norm_bound, self.box_size)
+        norm_bound = min(norm_bound, 1)
         xdim = G.shape[0]
         prev_G = state.get('cvx_hull_prev_G')
         def all_eq(a, b):
@@ -512,20 +510,21 @@ class UnconstrainedFuncSubDiffHelper:
         if prev_G is not None and prev_G.shape == G.shape and all_eq(prev_G, G):
             result = state['cvx_hull_prev_result']
         else:
-            result = (SOCPSolverBase.make(dim=xdim)
+            result = (solver_factory(dim=xdim)
                       .add_ineq(G.T)
                       .add_x_norm_bound()
                       .solve())
             state['cvx_hull_prev_G'] = G
             state['cvx_hull_prev_result'] = result
 
-        df_lb = result.dobj * self.f_lb_norm_bound
+        df_lb = result.dobj * self.f_lb_norm_bound_mul * np.sqrt(xdim)
         result = result * norm_bound
         dx_dg = (result.x @ G).max()
         np.testing.assert_allclose(dx_dg, result.pobj, atol=1e-6, rtol=1e-6)
-        assert dx_dg >= result.dobj - 1e-6
+        assert dx_dg >= result.dobj - 1e-7, (
+            dx_dg, result.dobj, result.dobj - dx_dg)
 
-        df_is_g = norm_bound <= 1e-3
+        df_is_g = norm_bound <= self.df_g_norm_bound_thresh
         if df_lb >= -1e-9:
             return TRAFSStep.make_zero(xdim, df_is_g)
 

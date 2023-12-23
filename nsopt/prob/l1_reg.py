@@ -1,5 +1,5 @@
 from ..opt.shared import (
-    ProximalGradOptimizable, StronglyConvexOptimizable, StronglyConvexParams)
+    ProximalGradOptimizable, KnownLipschitzOptimizable, LipschitzConstants)
 from .utils import make_stable_rng, UnconstrainedFuncSubDiffHelper
 
 import attr
@@ -125,7 +125,7 @@ class L1RegularizedOptimizable(ProximalGradOptimizable):
         return np.sign(y) * np.maximum(np.abs(y) - t, 0.)
 
 
-class LassoRegression(L1RegularizedOptimizable, StronglyConvexOptimizable):
+class LassoRegression(L1RegularizedOptimizable, KnownLipschitzOptimizable):
     """min 1/2m ||Ax - b||^2 + lam ||x||_1"""
     A: npt.NDArray
     b: npt.NDArray
@@ -163,7 +163,7 @@ class LassoRegression(L1RegularizedOptimizable, StronglyConvexOptimizable):
         res2 = np.square(res, out=res)
         return (1 / (m*2)) * np.sum(res2, axis=1)
 
-    def eval_cvx_params(self) -> StronglyConvexParams:
+    def eval_cvx_params(self) -> LipschitzConstants:
         A = self.A
         m, n = A.shape
         R = np.sqrt(n)  # a rough estimation
@@ -172,11 +172,15 @@ class LassoRegression(L1RegularizedOptimizable, StronglyConvexOptimizable):
         L = eig[-1] * R
         alpha = np.abs(eig[0])
         beta = eig[-1]
-        return StronglyConvexParams(float(self.eval(self.x0)), R, L, alpha, beta)
+        return LipschitzConstants(float(self.eval(self.x0)), R, L, alpha, beta)
+
+    def __repr__(self):
+        return (f'L1Reg(m={self.A.shape[0]},'
+                f' n={self.A.shape[1]}, lam={self.lam:.2g})')
 
     @classmethod
-    def gen_random(cls, m, n, lam,
-                   sparsity=0.6, noise=0.05,
+    def gen_random(cls, m: int, n: int, lam: float,
+                   sparsity=0.95, noise=0.05,
                    rng: typing.Optional[np.random.Generator] = None
                    ) -> tuple["LassoRegression", npt.NDArray]:
         """
@@ -252,9 +256,13 @@ class LassoClassification(L1RegularizedOptimizable):
         ce = (1/m) * (sps.logsumexp(Ax, axis=2) - Ax_b).sum(axis=0)
         return ce
 
+    def __repr__(self):
+        return (f'L1Cls(m={self.A.shape[0]},'
+                f' n={self.A.shape[1]}, k={self.nr_class}, lam={self.lam:.2g})')
+
     @classmethod
-    def gen_random(cls, m, n, nr_class, lam,
-                   sparsity=0.6, noise=0.05,
+    def gen_random(cls, m: int, n: int, nr_class: int, lam: float,
+                   sparsity=0.95, noise=0.05,
                    rng: typing.Optional[np.random.Generator] = None
                    ) -> tuple["LassoClassification", npt.NDArray]:
         """:return: (problem, xtrue)"""
