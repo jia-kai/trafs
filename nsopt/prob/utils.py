@@ -470,7 +470,7 @@ class UnconstrainedFuncSubDiffHelper:
         :param dx_dg_fn: a function that computes dx_dg given dx
         """
         gc_norm = np.linalg.norm(gc, ord=2)
-        if gc_norm == 0:
+        if gc_norm <= 1e-12:
             return TRAFSStep.make_zero(gc.size, True)
 
         # although the problem is unconstrained, we assume we are optimizing

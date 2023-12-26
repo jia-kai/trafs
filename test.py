@@ -127,20 +127,11 @@ class TestL1SubDiff(TestCaseWithRng):
         g_high[idx] = g0[idx] + lam
 
         g_low_get, g_high_get = LassoRegression.SubDiff(
-            x0, g0, pen, lam)._get_subgrad(self.slack, 100)
+            x0, g0, pen, lam)._get_subgrad(self.slack)
         np.testing.assert_allclose(g_low, g_low_get)
         np.testing.assert_allclose(g_high, g_high_get)
 
-    def test_meth1(self):
-        n = self.n
-        slack = self.slack
-        thresh = slack / (2 * np.sqrt(n)) - 1e-4
-        idx = [1, 3, 5, 7, 8]
-        pen = self.rng.uniform(slack / 2 + 1e-4, slack, n)
-        pen[idx] = self.rng.uniform(thresh * 0.99, thresh, len(idx))
-        self._check_subg(pen, idx)
-
-    def test_meth2(self):
+    def test_meth(self):
         n = self.n
         slack = self.slack
         thresh = slack / (2 * np.sqrt(n)) + 1e-4

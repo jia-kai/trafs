@@ -22,7 +22,7 @@ class SA2Solver:
             param = obj.eval_cvx_params()
             lr_mul = param.R / param.L
         else:
-            lr_mul = 1
+            lr_mul = obj.pgd_default_lr
 
         timer = CPUTimer()
         for i in range(self.max_iters):

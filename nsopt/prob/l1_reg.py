@@ -37,53 +37,19 @@ class L1RegularizedOptimizable(ProximalGradOptimizable):
         lam: float
         """the regularization parameter"""
 
-        def _subg1(self, slack, norm_bound):
-            """subgradient of lam*l1(x) using the first method"""
-            sn = np.sqrt(self.x0.size)
-
-            y = self.pen[self.pen > slack / (2 * sn)]
-            if y.size:
-                norm_bound = min(y.min(), norm_bound)
-            yield norm_bound    # range of validity (i.e., D_eps f(x) in paper)
-
-            # mask of selected nonsmooth coordinates
-            yield self.pen < norm_bound
-
-        def _subg2(self, slack, norm_bound):
-            """subgradient of lam*l1(x) using the second method"""
+        def _get_subgrad(self, slack):
             st_idx = np.argsort(self.pen)
             st_val = self.pen[st_idx]
             cum = np.cumsum(st_val)
-            cum_i = np.searchsorted(cum, slack / 2, side='right')
-            # cum[cum_i] > slack / 2 >= cum[cum_i - 1]
 
-            # range of validity
-            if cum_i < len(cum):
-                yield min(st_val[cum_i], norm_bound)
-            else:
-                yield norm_bound
+            # cum[i] > slack / 2 >= cum[i - 1]
+            i = np.searchsorted(cum, slack / 2, side='right')
 
             # mask of selected nonsmooth coordinates
-            j = np.searchsorted(st_val, norm_bound, side='right')
-            p = min(j, cum_i)
             mask = np.zeros_like(self.pen, dtype=bool)
-            mask[st_idx[:p]] = True
-            yield mask
-
-        def _get_subgrad(self, slack, norm_bound):
-            meth1_it = self._subg1(slack, norm_bound)
-            meth2_it = self._subg2(slack, norm_bound)
-
-            valid_range1 = next(meth1_it)
-            valid_range2 = next(meth2_it)
-
-            if valid_range1 >= valid_range2:
-                meth_it = meth1_it
-            else:
-                meth_it = meth2_it
-
+            mask[st_idx[:i]] = True
             lam = self.lam
-            sel = np.where(next(meth_it),
+            sel = np.where(mask,
                            np.array(lam, dtype=self.pen.dtype),
                            np.array(0, dtype=self.pen.dtype))
             g = add_(mul_(np.sign(self.x0), (lam - sel)), self.g0)
@@ -94,7 +60,7 @@ class L1RegularizedOptimizable(ProximalGradOptimizable):
                 subg_slack: float, df_lb_thresh: float, norm_bound: float,
                 state: dict):
             assert norm_bound > 0
-            glow, ghigh = self._get_subgrad(subg_slack, norm_bound)
+            glow, ghigh = self._get_subgrad(subg_slack)
             return self._helper.reduce_grad_range(glow, ghigh, df_lb_thresh,
                                                   norm_bound)
 
