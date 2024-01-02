@@ -11,16 +11,28 @@ def setup_pyx_import():
     # use a local cache in the directory of this repo to avoid conflicts with
     # multiple source versions on the system
     build_dir = Path(__file__).resolve().parent.parent / 'build'
+    from pyximport import pyxbuild
     import pyximport
-    px = pyximport.install(
-        build_dir=build_dir,
-        setup_args={
-            'include_dirs': [np.get_include()],
-        },
-        language_level=3,
-    )
-    yield
-    pyximport.uninstall(*px)
+    assert pyxbuild.HAS_CYTHON
+    orig_build_ext = pyxbuild.build_ext
+    class build_ext(orig_build_ext):
+        def build_extension(self, ext):
+            print(f'building cython extension {ext.name} ...')
+            return super().build_extension(ext)
+
+    pyxbuild.build_ext = build_ext
+    try:
+        px = pyximport.install(
+            build_dir=build_dir,
+            setup_args={
+                'include_dirs': [np.get_include()],
+            },
+            language_level=3,
+        )
+        yield
+        pyximport.uninstall(*px)
+    finally:
+        pyxbuild.build_ext = orig_build_ext
 
 def default_make_ext_for_pyx(modname, pyxfilename):
     return Extension(

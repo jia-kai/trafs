@@ -1,21 +1,78 @@
+"""benchmark problems from [1]
+
+[1] Haarala, M. and Miettinen, K. and Maekelae, M. M., New limited memory
+bundle method for large-scale nonsmooth optimization. """
+
 from ..opt.shared import UnconstrainedOptimizable, LipschitzConstants, TRAFSStep
 from .utils import UnconstrainedFuncSubDiffHelper, mosek, print_once
 from ..utils import setup_pyx_import
 
+import scipy.sparse as sp
 import numpy as np
 import numpy.typing as npt
 import attrs
 
 with setup_pyx_import():
-    from .mxhilb_utils import mxhilb_comp_batch, mxhilb_subd
+    from .hmm_bench_utils import mxhilb_comp_batch, mxhilb_subd
 
-class GeneralizedMXHILB(UnconstrainedOptimizable):
-    """the generalized MXHILB, see [1]
+class MaxQ(UnconstrainedOptimizable):
+    """max x_i^2"""
+    x0: npt.NDArray
 
-    [1] Haarala, M. and Miettinen, K. and Maekelae, M. M., New limited memory
-    bundle method for large-scale nonsmooth optimization.
-    """
+    @attrs.frozen
+    class SubDiff(UnconstrainedOptimizable.SubDiff):
+        _helper = UnconstrainedFuncSubDiffHelper()
 
+        fval: float
+        x: npt.NDArray
+        comp: npt.NDArray
+
+        def take_arbitrary(self):
+            ret = np.zeros_like(self.comp)
+            ret[np.argmax(self.comp)] = 2 * self.x[np.argmax(self.comp)]
+            return ret
+
+        def reduce_trafs(
+                self,
+                subg_slack: float, df_lb_thresh: float, norm_bound: float,
+                state: dict) -> TRAFSStep:
+
+            act_mask = (self.fval - self.comp) <= subg_slack
+            act_idx = np.flatnonzero(act_mask)
+            data = 2 * self.x[act_idx]
+            G = sp.csc_matrix(
+                (data, (act_idx, np.arange(act_idx.size, dtype=np.int32))),
+                shape=(self.comp.size, act_idx.size),
+            )
+            return self._helper.reduce_from_cvx_hull_qp(
+                G, df_lb_thresh, norm_bound, state,
+            )
+
+    def __init__(self, n: int):
+        x0 = np.arange(1, n + 1, dtype=np.float64)
+        x0[n // 2:] *= -1
+        x0 *= np.sqrt(n) / np.linalg.norm(x0, ord=2)
+        self.x0 = x0
+
+    def eval(self, x: npt.NDArray, *, need_grad=False):
+        assert x.ndim == 1
+        assert x.size >= 1
+        comp = np.square(x)
+        fval = comp.max()
+        if need_grad:
+            return fval, self.SubDiff(fval, x, comp)
+        else:
+            return fval
+
+    def eval_batch(self, x: npt.NDArray):
+        return np.square(x).max(axis=1)
+
+    def __repr__(self):
+        return f'MaxQ(n={self.x0.size})'
+
+
+class MXHILB(UnconstrainedOptimizable):
+    """max |c_i| where c = Mx, M is the Hilbert matrix"""
     x0: npt.NDArray
 
     @attrs.frozen

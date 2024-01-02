@@ -470,7 +470,7 @@ class UnconstrainedFuncSubDiffHelper:
         :param dx_dg_fn: a function that computes dx_dg given dx
         """
         gc_norm = np.linalg.norm(gc, ord=2)
-        if gc_norm <= 1e-12:
+        if gc_norm <= 1e-10:
             return TRAFSStep.make_zero(gc.size, True)
 
         # although the problem is unconstrained, we assume we are optimizing
@@ -491,9 +491,7 @@ class UnconstrainedFuncSubDiffHelper:
     def reduce_from_cvx_hull_socp(
             self, G: DenseOrSparse, df_lb_thresh: float, norm_bound: float,
             state: dict,
-            solver_factory:
-                typing.Callable[..., SOCPSolverBase]=SOCPSolverBase.make
-        ) -> TRAFSStep:
+            force_clarabel=False) -> TRAFSStep:
         """Reduce to a subgradient given the convex hull. The vertices of the
         convex hull are columns of ``G``. Use an SOCP solver to compute the
         result.
@@ -510,6 +508,11 @@ class UnconstrainedFuncSubDiffHelper:
         if prev_G is not None and prev_G.shape == G.shape and all_eq(prev_G, G):
             result = state['cvx_hull_prev_result']
         else:
+            if force_clarabel:
+                assert clarabel is not None, 'Clarabel is required'
+                solver_factory = ClarabelSOCPSolver
+            else:
+                solver_factory = SOCPSolverBase.make
             result = (solver_factory(dim=xdim)
                       .add_ineq(G.T)
                       .add_x_norm_bound()
@@ -590,7 +593,7 @@ class UnconstrainedFuncSubDiffHelper:
         solver.settings.eps_rel = self.qp_eps
         solver.settings.eps_duality_gap_abs = self.qp_eps
         solver.settings.eps_duality_gap_rel = self.qp_eps
-        #solver.settings.verbose = True
+        # solver.settings.verbose = True
         solver.settings.max_iter = self.qp_iters
         solver.setup(qp_P, qp_c, qp_A, qp_b, qp_G, qp_h, qp_lb, qp_ub)
         solver.solve()

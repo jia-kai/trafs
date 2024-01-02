@@ -5,19 +5,25 @@ from nsopt import setup_threads
 setup_threads()
 
 from nsopt.opt import MethodFactory
-from nsopt.prob import MaxOfAbs, GeneralizedMXHILB
+from nsopt.prob import MaxOfAbs, MaxQ, MXHILB
 
 import numpy as np
 import matplotlib.pyplot as plt
 
 import argparse
 
+prob_map = {
+    'mabs': MaxOfAbs,
+    'mxhilb': MXHILB,
+    'maxq': MaxQ,
+}
+
 def main():
     factory = MethodFactory(MaxOfAbs)
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    parser.add_argument('-p', '--problem', choices=['mxhilb', 'mabs'],
+    parser.add_argument('-p', '--problem', choices=prob_map.keys(),
                         default='mabs',
                         help='problem to run')
     parser.add_argument('-n', '--num-dim', type=int, default=10,
@@ -27,11 +33,7 @@ def main():
     factory.setup_parser(parser)
     args = parser.parse_args()
 
-    if args.problem == 'mxhilb':
-        prob = GeneralizedMXHILB(args.num_dim)
-    else:
-        assert args.problem == 'mabs'
-        prob = MaxOfAbs(args.num_dim)
+    prob = prob_map[args.problem](args.num_dim)
 
     if args.rand_x0:
         x0 = np.random.standard_normal(args.num_dim)

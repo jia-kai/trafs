@@ -5,10 +5,12 @@ from nsopt.opt.shared import (
     Optimizable, ProximalGradOptimizable, UnconstrainedOptimizable)
 from nsopt.prob.utils import make_stable_rng
 from nsopt.prob import (LassoRegression, LassoClassification, MaxOfAbs,
-                        GeneralizedMXHILB, DistanceGame)
+                        MaxQ, MXHILB, DistanceGame)
 
 import unittest
 import itertools
+
+SIMPLE_PROBS = [MaxQ, MXHILB]
 
 class TestCaseWithRng(unittest.TestCase):
     def setUp(self):
@@ -45,9 +47,11 @@ class BatchEvalTest(TestCaseWithRng):
         moa = MaxOfAbs(100)
         self.check(moa)
 
-    def test_generalized_mxhilb(self):
-        mxh = GeneralizedMXHILB(100)
-        self.check(mxh)
+    def test_simple_probs(self):
+        for cls in SIMPLE_PROBS:
+            with self.subTest(problem_class=cls):
+                p = cls(100)
+                self.check(p)
 
     def test_distance_game(self):
         g = DistanceGame.gen_random(50)
@@ -96,11 +100,13 @@ class NumericalGradTest(TestCaseWithRng):
         x0[0] += 5
         self.check_numerical_subdiff(moa, x0)
 
-    def test_generalized_mxhilb(self):
+    def test_simple_probs(self):
         for n in range(95, 105):
-            mxh = GeneralizedMXHILB(n)
-            x0 = self.rng.standard_normal(mxh.x0.shape)
-            self.check_numerical_subdiff(mxh, x0)
+            for cls in SIMPLE_PROBS:
+                with self.subTest(problem_class=cls, n=n):
+                    prob = cls(n)
+                    x0 = self.rng.standard_normal(prob.x0.shape)
+                    self.check_numerical_subdiff(prob, x0)
 
     def test_distance_game(self):
         for n in itertools.chain([5], range(95, 105)):

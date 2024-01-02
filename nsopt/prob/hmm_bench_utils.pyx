@@ -57,5 +57,5 @@ def mxhilb_subd(
             if comp[i] < 0:
                 c = -c
             cols.append(c)
-    
+
     return np.ascontiguousarray(np.array(cols).T)

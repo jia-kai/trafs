@@ -11,10 +11,10 @@ def projection_simplex(v: npt.NDArray, z: float=1) -> npt.NDArray:
     n_features = v.shape[0]
     u = np.ascontiguousarray(np.sort(v)[::-1])
     cssv = np.cumsum(u) - z
-    ind = np.arange(1, n_features + 1, dtype=v.dtype) 
-    cond = u * ind > cssv 
+    ind = np.arange(1, n_features + 1, dtype=v.dtype)
+    cond = u * ind > cssv
     rho = np.count_nonzero(cond)
-    assert rho > 0 and cond[rho - 1]
+    assert rho > 0 and cond[rho - 1], v
     lam = cssv[rho - 1] / float(rho)
     w = v - lam
     w = np.maximum(w, 0, out=w)

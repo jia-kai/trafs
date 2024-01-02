@@ -1,9 +1,10 @@
 """benchmark problems"""
 
 __all__ = ['LassoRegression', 'LassoClassification', 'MaxOfAbs',
-           'GeneralizedMXHILB', 'DistanceGame']
+           'MaxQ', 'MXHILB',
+           'DistanceGame']
 
 from .l1_reg import LassoRegression, LassoClassification
 from .max_of_abs import MaxOfAbs
-from .mxhilb import GeneralizedMXHILB
+from .hmm_bench import MaxQ, MXHILB
 from .distance_game import DistanceGame

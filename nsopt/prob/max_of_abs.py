@@ -1,6 +1,6 @@
 from ..opt.shared import (UnconstrainedOptimizable, KnownLipschitzOptimizable,
                           LipschitzConstants, TRAFSStep)
-from .utils import UnconstrainedFuncSubDiffHelper, ClarabelSOCPSolver
+from .utils import UnconstrainedFuncSubDiffHelper
 from ..utils import setup_pyx_import
 
 import numpy as np
@@ -54,7 +54,7 @@ class MaxOfAbs(UnconstrainedOptimizable, KnownLipschitzOptimizable):
             # Clarabel seems more stable
             return self._helper.reduce_from_cvx_hull_socp(
                 G, df_lb_thresh, norm_bound, state,
-                solver_factory=ClarabelSOCPSolver
+                force_clarabel=True,
             )
 
     def __init__(self, n: int):
