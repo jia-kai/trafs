@@ -13,7 +13,8 @@ import numpy.typing as npt
 import attrs
 
 with setup_pyx_import():
-    from .hmm_bench_utils import mxhilb_comp_batch, mxhilb_subd
+    from .hmm_bench_utils import (
+        mxhilb_comp_batch, mxhilb_subd, chained_lq_subd)
 
 class MaxQ(UnconstrainedOptimizable):
     """max x_i^2"""
@@ -39,13 +40,16 @@ class MaxQ(UnconstrainedOptimizable):
 
             act_mask = (self.fval - self.comp) <= subg_slack
             act_idx = np.flatnonzero(act_mask)
-            data = 2 * self.x[act_idx]
-            G = sp.csc_matrix(
-                (data, (act_idx, np.arange(act_idx.size, dtype=np.int32))),
-                shape=(self.comp.size, act_idx.size),
-            )
-            return self._helper.reduce_from_cvx_hull_qp(
-                G, df_lb_thresh, norm_bound, state,
+            a = 2 * self.x[act_idx]
+            if np.abs(a).min() <= 1e-10:
+                return TRAFSStep.make_zero(self.x.size, True)
+            # min_{p in Delta(n)} sum (a_i p_i)^2
+            a2r = np.reciprocal(np.square(a))
+            gc = np.zeros_like(self.x)
+            gc[act_idx] = (a * a2r) / a2r.sum()
+            return self._helper.reduce_with_min_grad(
+                gc, df_lb_thresh, norm_bound,
+                dx_dg_fn=lambda dx: (a * dx[act_idx]).max()
             )
 
     def __init__(self, n: int):
@@ -67,6 +71,9 @@ class MaxQ(UnconstrainedOptimizable):
     def eval_batch(self, x: npt.NDArray):
         return np.square(x).max(axis=1)
 
+    def get_optimal_value(self):
+        return 0.0
+
     def __repr__(self):
         return f'MaxQ(n={self.x0.size})'
 
@@ -77,10 +84,7 @@ class MXHILB(UnconstrainedOptimizable):
 
     @attrs.frozen
     class SubDiff(UnconstrainedOptimizable.SubDiff):
-        _helper = UnconstrainedFuncSubDiffHelper(
-            qp_eps=1e-3,
-            qp_iters=200,
-        )
+        _helper = UnconstrainedFuncSubDiffHelper()
 
         fval: float
         recips: npt.NDArray
@@ -106,7 +110,7 @@ class MXHILB(UnconstrainedOptimizable):
 
             # MOSEK is faster than PIQP
             # PIQP faster than Clarabel
-            if mosek is None:
+            if mosek is None or self._helper.cvx_hull_prefer_qp:
                 print_once('Use PIQP to solve min norm grad')
                 return self._helper.reduce_from_cvx_hull_qp(
                     G, df_lb_thresh, norm_bound, state)
@@ -143,5 +147,68 @@ class MXHILB(UnconstrainedOptimizable):
             alpha=0,
             beta=0)
 
+    def get_optimal_value(self):
+        return 0.0
+
     def __repr__(self):
         return f'MXHILB(n={self.x0.size})'
+
+
+class ChainedLQ(UnconstrainedOptimizable):
+    """-x_i - x_{i+1} + max (x_i^2 + x_{i+1}^2 - 1, 0)"""
+    x0: npt.NDArray
+
+    @attrs.frozen
+    class SubDiff(UnconstrainedOptimizable.SubDiff):
+        _helper = UnconstrainedFuncSubDiffHelper()
+
+        base_grad: npt.NDArray
+        x: npt.NDArray
+        comp: npt.NDArray
+        """x_i^2 + x_{i+1}^2 - 1"""
+
+        def take_arbitrary(self):
+            act_idx = np.flatnonzero(self.comp >= 0)
+            ret = self.base_grad.copy()
+            ret[act_idx] += 2 * self.x[act_idx]
+            ret[act_idx + 1] += 2 * self.x[act_idx + 1]
+            return ret
+
+        def reduce_trafs(
+                self,
+                subg_slack: float, df_lb_thresh: float, norm_bound: float,
+                state: dict) -> TRAFSStep:
+
+            g_base = self.base_grad.copy()
+            G = chained_lq_subd(subg_slack, g_base, self.x, self.comp)
+            return self._helper.reduce_from_box_socp(
+                G, g_base, df_lb_thresh, norm_bound, state)
+
+
+    def __init__(self, n: int):
+        self.x0 = np.full(n, -0.5, dtype=np.float64)
+
+    def eval(self, x: npt.NDArray, *, need_grad=False):
+        x2 = np.square(x)
+        comp = x2[:-1] + x2[1:] - 1
+        fval = -x.sum() * 2 + x[0] + x[-1] + np.maximum(comp, 0).sum()
+        if need_grad:
+            base_grad = np.full_like(x, -2, dtype=np.float64)
+            base_grad[0] = -1
+            base_grad[-1] = -1
+            return fval, self.SubDiff(base_grad, x, comp)
+        else:
+            return fval
+
+    def eval_batch(self, x: npt.NDArray):
+        x2 = np.square(x)
+        comp = x2[:, :-1] + x2[:, 1:] - 1
+        fval = (-x.sum(axis=1) * 2 + x[:, 0] + x[:, -1] +
+                np.maximum(comp, 0).sum(axis=1))
+        return fval
+
+    def get_optimal_value(self):
+        return -np.sqrt(2) * (self.x0.size - 1)
+
+    def __repr__(self):
+        return f'ChainedLQ(n={self.x0.size})'

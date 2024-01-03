@@ -5,12 +5,12 @@ from nsopt.opt.shared import (
     Optimizable, ProximalGradOptimizable, UnconstrainedOptimizable)
 from nsopt.prob.utils import make_stable_rng
 from nsopt.prob import (LassoRegression, LassoClassification, MaxOfAbs,
-                        MaxQ, MXHILB, DistanceGame)
+                        MaxQ, ChainedLQ, MXHILB, DistanceGame)
 
 import unittest
 import itertools
 
-SIMPLE_PROBS = [MaxQ, MXHILB]
+SIMPLE_PROBS = [MaxQ, MXHILB, ChainedLQ]
 
 class TestCaseWithRng(unittest.TestCase):
     def setUp(self):

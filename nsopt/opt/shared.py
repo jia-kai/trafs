@@ -161,6 +161,10 @@ class Optimizable(metaclass=ABCMeta):
     def proj(self, x: npt.NDArray) -> npt.NDArray:
         """projection onto the feasible set"""
 
+    def get_optimal_value(self) -> typing.Optional[float]:
+        """get the optimal value if available"""
+        return None
+
 
 class KnownLipschitzOptimizable(Optimizable):
     """problems with known Lipschitz constants"""

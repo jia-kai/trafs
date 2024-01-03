@@ -5,7 +5,7 @@ from nsopt import setup_threads
 setup_threads()
 
 from nsopt.opt import MethodFactory
-from nsopt.prob import MaxOfAbs, MaxQ, MXHILB
+from nsopt.prob import MaxOfAbs, MaxQ, MXHILB, ChainedLQ
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -16,6 +16,7 @@ prob_map = {
     'mabs': MaxOfAbs,
     'mxhilb': MXHILB,
     'maxq': MaxQ,
+    'clq': ChainedLQ,
 }
 
 def main():
@@ -40,11 +41,12 @@ def main():
         prob.x0[:] = x0
 
     results = factory.run_solvers(args, prob)
+    opt = float(prob.get_optimal_value())
 
     plt.figure()
     def plot(r, label):
         print(f'{label}: f={r.fval:.3g}')
-        plt.plot(np.arange(len(r.fval_hist)), r.fval_hist, label=label)
+        plt.plot(np.arange(len(r.fval_hist)), r.fval_hist - opt, label=label)
     for k, v in results.items():
         plot(v, k)
     plt.xlabel('Iters')

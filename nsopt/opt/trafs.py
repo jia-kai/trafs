@@ -162,6 +162,8 @@ class TRAFSRuntime:
     subg_slack_tune_dir: int = 0
     """direction of eps tuning: -1 for decrease, 1 for increase, 0 for random"""
 
+    subg_slack_is_from_random: bool = False
+
     fval_lb: float = -np.inf
     timer: CPUTimer = attrs.field(factory=CPUTimer)
     ls_tot_iters: int = 0
@@ -189,6 +191,7 @@ class TRAFSRuntime:
     def _randomize_subg_slack(self, reason: str):
         """try a random functional subdifferential slack after failure to find a
         descent direction"""
+        self.subg_slack_is_from_random = True
         k = np.log(100)
         self.subg_slack = max(
             np.exp(self.rng.uniform(-k, k)) * self.last_subg_slack,
@@ -385,10 +388,16 @@ class TRAFSRuntime:
                     self.subg_slack_est_mul * self.solver.subg_slack_decay)
                 self.logmsg(f'eps decayed to {self.subg_slack:.3g}'
                             ' due to dx@dg = 0')
-                # this iteration is considered successful as we have decreased
-                # eps with global bound
-                self.last_subg_slack = subg_slack
-                self.failed_iters = 0
+                if not self.subg_slack_is_from_random:
+                    # this iteration is considered successful as we have
+                    # decreased eps with global bound
+                    self.last_subg_slack = subg_slack
+                    self.failed_iters = 0
+                else:
+                    # do not count the current iteration as a failed one (so
+                    # only slack randomization is counted as a failed iteration)
+                    assert self.failed_iters > 0
+                    self.failed_iters -= 1
             else:
                 self._randomize_subg_slack('dx@dg = 0 without global guarantee')
             return xk, IterStatus.succeeded
@@ -416,7 +425,10 @@ class TRAFSRuntime:
                 f'no progress after line search (dx@dg={grad.dx_dg:.3g})')
             return xk, IterStatus.succeeded
 
+        # now we know that current iteration makes descent progress
+
         self.last_subg_slack = subg_slack
+        self.subg_slack_is_from_random = False
         self.failed_iters = 0
 
         dx_l2 = np.linalg.norm(ls_result.dx_new[idx0][idx1], ord=2)

@@ -11,18 +11,19 @@ import os
 import sys
 import typing
 
-# this is a fork of PIQP that supports the TRAFS objective (so we can set a
-# reduced accuracy parameter)
 import piqptr as piqp
 import clarabel
 try:
     import mosek
-    print(f'Mosek version: {mosek.Env.getversion()}')
 except ImportError:
     mosek = None
 if os.getenv('NSOPT_USE_CLARABEL'):
     mosek = None
 
+print('Solver versions:\n'
+      f' piqptr: {piqp.__version__}\n'
+      f' clarabel: {clarabel.__version__}\n'
+      f' mosek: {mosek.Env.getversion() if mosek is not None else "N/A"}')
 
 DenseOrSparse = typing.Union[npt.NDArray, sp.csc_matrix]
 
@@ -65,6 +66,10 @@ class SOCPSolverBase(metaclass=abc.ABCMeta):
     def add_x_lower(self, x_low: npt.NDArray) -> typing.Self:
         """add the constraint x >= x_low"""
 
+    def add_aux_lower(self, aux_low: npt.NDArray) -> typing.Self:
+        """add the constraint u >= aux_low"""
+        raise NotImplementedError()
+
     @abc.abstractmethod
     def add_x_higher(self, x_high: npt.NDArray) -> typing.Self:
         """add the constraint x <= x_high"""
@@ -75,9 +80,15 @@ class SOCPSolverBase(metaclass=abc.ABCMeta):
         """
 
     @abc.abstractmethod
-    def add_ineq(self, g: DenseOrSparse) -> typing.Self:
-        """add an inequality constraint ``g @ x <= u``, where ``g`` is a
-        matrix"""
+    def add_ineq(self, g: DenseOrSparse,
+                 ui: typing.Optional[npt.NDArray] = None) -> typing.Self:
+        """add an inequality constraint ``g @ x <= u[ui]``, where ``g`` is a
+        matrix
+
+        :param ui: the index into the auxiliary variable ``u``; if not
+            specified, it will be the first one. Its shape should be
+            ``[g.shape[0]]``.
+        """
 
     @abc.abstractmethod
     def add_socp(self, g: npt.NDArray, h: npt.NDArray) -> typing.Self:
@@ -92,10 +103,17 @@ class SOCPSolverBase(metaclass=abc.ABCMeta):
         """solve the problem"""
 
     @classmethod
-    def make(cls, dim: int) -> "SOCPSolverBase":
+    def make(cls, dim: int, dim_aux: int = 1,
+             coeff_vec: typing.Optional[npt.NDArray] = None) -> "SOCPSolverBase":
         # we do not use cvxpy because its compilation is too slow (each
         # iteration may have a different shape, which requires rebulding the
         # model and recompiling)
+        if dim_aux != 1 or coeff_vec is not None:
+            # I am too lazy to implement this case with mosek; clarabel works
+            # fine here
+            print_once('Use Clarabel as the SOCP solver with custom cost')
+            return ClarabelSOCPSolver(dim=dim, dim_aux=dim_aux,
+                                      coeff_vec=coeff_vec)
         if mosek is not None:
             print_once('Use MOSEK as the SOCP solver')
             return MosekSOCPSolver(dim=dim)
@@ -109,7 +127,14 @@ class SOCPSolverBase(metaclass=abc.ABCMeta):
 @attrs.frozen
 class ClarabelSOCPSolver(SOCPSolverBase):
     dim: int
-    """dimension of the step vector (num of variables is ``dim + 1``)"""
+    """dimension of the step vector (num of variables is ``dim + dim_aux``)"""
+
+    dim_aux: int = 1
+    """number of auxiliary variables"""
+
+    coeff_vec: typing.Optional[npt.NDArray] = None
+    """coefficients of the cost function; if not specified, there must be a
+    single auxiliary variable and it is the cost"""
 
     max_iter: int = 30
     """max number of iterations"""
@@ -132,7 +157,8 @@ class ClarabelSOCPSolver(SOCPSolverBase):
     def eye_x(self) -> sp.csc_matrix:
         """make a sparse identity matrix for x"""
         if self._eye_x is None:
-            I = sp.eye(self.dim, self.dim + 1, dtype=np.float64, format='csc')
+            I = sp.eye(self.dim, self.dim + self.dim_aux, dtype=np.float64,
+                       format='csc')
             object.__setattr__(self, '_eye_x', I)
         return self._eye_x
 
@@ -141,6 +167,17 @@ class ClarabelSOCPSolver(SOCPSolverBase):
         self.As.append(-self.eye_x)
         self.bs.append(-x_low)
         self.cones.append(clarabel.NonnegativeConeT(self.dim))
+        return self
+
+    def add_aux_lower(self, aux_low: npt.NDArray) -> typing.Self:
+        rows = np.arange(self.dim_aux, dtype=np.int32)
+        cols = rows + self.dim
+        data = np.full(self.dim_aux, -1, dtype=np.float64)
+        self.As.append(sp.csc_matrix(
+            (data, (rows, cols)), shape=(self.dim_aux, self.dim + self.dim_aux),
+            dtype=np.float64))
+        self.bs.append(-aux_low)
+        self.cones.append(clarabel.NonnegativeConeT(self.dim_aux))
         return self
 
     def add_x_higher(self, x_high: npt.NDArray) -> typing.Self:
@@ -152,15 +189,15 @@ class ClarabelSOCPSolver(SOCPSolverBase):
 
     def add_eq(self, v: npt.NDArray, b: npt.NDArray) -> typing.Self:
         assert v.ndim == 2 and b.ndim == 1 and v.shape[0] == b.size
-        tmp = np.zeros((v.shape[0], self.dim + 1), dtype=np.float64)
-        tmp[:, :-1] = v
+        tmp = np.zeros((v.shape[0], self.dim + self.dim_aux), dtype=np.float64)
+        tmp[:, :-self.dim_aux] = v
         self.As.append(sp.csc_matrix(tmp))
         self.bs.append(b)
         self.cones.append(clarabel.ZeroConeT(1))
         return self
 
-    def add_ineq(self, g: DenseOrSparse) -> typing.Self:
-        # g0 @ x <= u ==> -[g0, -1] @ [x, u] >= 0
+    def add_ineq(self, g: DenseOrSparse, ui=None) -> typing.Self:
+        # g0 @ x <= u[ui] ==> -[g0, -1] @ [x, u[ui]] >= 0
         assert g.ndim == 2
         n = g.shape[0]
         assert g.shape[1] == self.dim
@@ -168,10 +205,15 @@ class ClarabelSOCPSolver(SOCPSolverBase):
         if not isinstance(g, sp.csc_matrix):
             g = sp.csc_matrix(g)
 
-        self.As.append(sp.hstack(
-            [g, sp.csc_matrix(-np.ones((n, 1), dtype=np.float64))],
-            format='csc'
-        ))
+        if ui is None:
+            ui = np.zeros(n, dtype=np.int32)
+        else:
+            assert ui.shape == (n, ) and ui.dtype == np.int32
+        u_rows = np.arange(n, dtype=np.int32)
+        u_data = np.full(n, -1, dtype=np.float64)
+        u_mat = sp.csc_matrix((u_data, (u_rows, ui)),
+                              dtype=np.float64, shape=(n, self.dim_aux))
+        self.As.append(sp.hstack([g, u_mat], format='csc'))
         self.bs.append(np.zeros(n, dtype=np.float64))
         self.cones.append(clarabel.NonnegativeConeT(n))
         return self
@@ -180,7 +222,7 @@ class ClarabelSOCPSolver(SOCPSolverBase):
         # gi @ x + ||hi @ x||_2 <= u
         # ==> ||hi @ x||_2 <= u - gi @ x
         # ==> ||-hi @ x||_2 <= -[gi, -1] @ [x, u]
-        assert (g.shape == (self.dim,) and h.ndim == 2
+        assert (g.shape == (self.dim,) and h.ndim == 2 and self.dim_aux == 1
                 and h.shape[1] == self.dim)
         tmp = np.zeros((h.shape[0] + 1, self.dim + 1), dtype=np.float64)
         tmp[0, :-1] = g
@@ -196,32 +238,42 @@ class ClarabelSOCPSolver(SOCPSolverBase):
         # s[0] = 1
         # s[1:] = x
         # s = -([0; -I]x) + [1; 0]
-        n = self.dim + 1
         self.As.append(sp.vstack([
-            sp.csc_matrix((1, n), dtype=np.float64),
+            sp.csc_matrix((1, self.dim + self.dim_aux), dtype=np.float64),
             -self.eye_x]))
-        tmp = np.zeros(n, dtype=np.float64)
+        tmp = np.zeros(self.dim + 1, dtype=np.float64)
         tmp[0] = 1
         self.bs.append(tmp)
-        self.cones.append(clarabel.SecondOrderConeT(n))
+        self.cones.append(clarabel.SecondOrderConeT(self.dim + 1))
         return self
 
     def solve(self) -> SOCPSolverBase.Result:
+        assert self.dim > 0 and self.dim_aux >= 0
         A = sp.vstack(self.As).tocsc()
         b = np.concatenate(self.bs)
-        n = self.dim + 1
+        n = self.dim + self.dim_aux
         P = sp.csc_matrix((n, n), dtype=np.float64)
-        q = np.zeros(n, dtype=np.float64)
-        q[-1] = 1
+        if self.coeff_vec is None:
+            assert self.dim_aux == 1
+            q = np.zeros(n, dtype=np.float64)
+            q[-1] = 1
+        else:
+            q = self.coeff_vec
+            assert q.shape == (n, )
         setting = clarabel.DefaultSettings()
         setting.max_iter = self.max_iter
         setting.verbose = self.verbose
         solver = clarabel.DefaultSolver(P, q, A, b, self.cones, setting)
         solution = solver.solve()
 
-        x = np.ascontiguousarray(solution.x[:-1])
-        u = solution.x[-1]
-        np.testing.assert_allclose(u, solution.obj_val)
+        x = np.ascontiguousarray(solution.x[:self.dim])
+        assert x.shape == (self.dim, ), (
+            x.shape, len(solution.x), self.dim, self.dim_aux)
+        if self.coeff_vec is None:
+            u = solution.x[-1]
+            np.testing.assert_allclose(u, solution.obj_val)
+        else:
+            u = solution.obj_val
         S = clarabel.SolverStatus
         assert solution.status in (S.Solved, S.AlmostSolved,
                                    S.MaxIterations, S.MaxTime), (
@@ -230,7 +282,7 @@ class ClarabelSOCPSolver(SOCPSolverBase):
         # CLARABEL does not return the dual objective value; we have to compute
         # it ourselves
         dual_obj = -b @ solution.z
-        assert dual_obj <= u
+        assert dual_obj <= u + 1e-8, (dual_obj, u, dual_obj - u)
 
         if solution.status == S.Solved:
             np.testing.assert_allclose(dual_obj, u, atol=1e-6, rtol=1e-6)
@@ -306,8 +358,9 @@ class MosekSOCPSolver(SOCPSolverBase):
             task.putconbound(r + i, mosek.boundkey.fx, b[i], b[i])
         return self
 
-    def add_ineq(self, g: DenseOrSparse) -> typing.Self:
+    def add_ineq(self, g: DenseOrSparse, ui=None) -> typing.Self:
         # g @ x <= u
+        assert ui is None
         assert g.ndim == 2
         assert g.shape[1] == self.dim
         task = self._task
@@ -433,15 +486,21 @@ class UnconstrainedFuncSubDiffHelper:
     """maximum norm bound for the current lower bound of df to be considered as
     global"""
 
+    gc_norm_zthresh: float = 1e-9
+    """consider the gradient as zero if its norm is smaller than this value"""
+
     f_lb_norm_bound_mul: float = 1
     """L2 norm bound multiplier (multiplied with sqrt(n)) to compute the lower
     bound of the objective delta"""
 
-    qp_eps: float = 1e-4
+    qp_eps: float = 1e-3
     """tolerance for the QP solver"""
 
-    qp_iters: int = 500
+    qp_iters: int = 200
     """max number of iterations for the QP solver"""
+
+    cvx_hull_prefer_qp: bool = os.getenv('NSOPT_CVX_HULL_PREFER_QP') == '1'
+    cvx_hull_prefer_socp: bool = os.getenv('NSOPT_CVX_HULL_PREFER_SOCP') == '1'
 
     def reduce_grad_range(
             self, glow: npt.NDArray, ghigh: npt.NDArray,
@@ -470,20 +529,20 @@ class UnconstrainedFuncSubDiffHelper:
         :param dx_dg_fn: a function that computes dx_dg given dx
         """
         gc_norm = np.linalg.norm(gc, ord=2)
-        if gc_norm <= 1e-10:
+        if gc_norm <= self.gc_norm_zthresh:
             return TRAFSStep.make_zero(gc.size, True)
 
         # although the problem is unconstrained, we assume we are optimizing
         # within the unit ball around current solution
         dx = gc * (-min(norm_bound, 1) / np.maximum(gc_norm, 1e-9))
         if dx_dg_fn is None:
-            dx_dg = np.dot(dx, gc)
+            dx_dg = float(np.dot(dx, gc))
         else:
-            dx_dg = dx_dg_fn(dx)
-        # min_d max_g d@g = max_g -|g| = -min_g |g| >= -gc_norm even if gc is
-        # not the global minimum
+            dx_dg = float(dx_dg_fn(dx))
         if dx_dg >= 0:
             return TRAFSStep.make_zero(gc.size, False)
+        # min_d max_g d@g = max_g -|g| = -min_g |g| >= -gc_norm even if gc is
+        # not the global minimum
         df_l = -gc_norm * self.f_lb_norm_bound_mul * np.sqrt(gc.size)
         df_is_g = norm_bound <= self.df_g_norm_bound_thresh
         return TRAFSStep(dx, dx_dg, df_l, df_is_g)
@@ -520,20 +579,33 @@ class UnconstrainedFuncSubDiffHelper:
             state['cvx_hull_prev_G'] = G
             state['cvx_hull_prev_result'] = result
 
+        return self.reduce_with_socp_result(
+            result, df_lb_thresh, norm_bound,
+            dx_dg_fn=lambda dx: (dx @ G).max()
+        )
+
+    def reduce_with_socp_result(
+            self, result: SOCPSolverBase.Result,
+            df_lb_thresh: float, norm_bound: float,
+            dx_dg_fn: typing.Callable[[npt.NDArray], float]) -> TRAFSStep:
+        """get the TRAFS step from the result of an SOCP solver that solves
+
+                min_{x in B[1]} max_{g in G} d @ g
+        """
+        xdim = result.x.size
         df_lb = result.dobj * self.f_lb_norm_bound_mul * np.sqrt(xdim)
         result = result * norm_bound
-        dx_dg = (result.x @ G).max()
+        dx_dg = dx_dg_fn(result.x)
         np.testing.assert_allclose(dx_dg, result.pobj, atol=1e-6, rtol=1e-6)
-        assert dx_dg >= result.dobj - 1e-7, (
+        assert dx_dg >= result.dobj - 2e-7, (
             dx_dg, result.dobj, result.dobj - dx_dg)
 
         df_is_g = norm_bound <= self.df_g_norm_bound_thresh
         if df_lb >= -1e-9:
             return TRAFSStep.make_zero(xdim, df_is_g)
 
-        df_is_g = df_is_g and result.is_optimal
         if dx_dg >= 0:
-            return TRAFSStep.make_zero(xdim, df_is_g)
+            return TRAFSStep.make_zero(xdim, df_is_g and result.is_optimal)
 
         return TRAFSStep(
             dx=result.x,
@@ -577,24 +649,115 @@ class UnconstrainedFuncSubDiffHelper:
         qp_c = np.zeros(dim, dtype=np.float64)
         qp_A = np.ones((1, dim), dtype=np.float64)
         qp_b = np.ones(1, dtype=np.float64)
-        qp_G = np.zeros((0, dim), dtype=np.float64)
+        qp_G = -GtG # GtG @ x > 0 ensures descent progress
+        qp_h = np.zeros(dim, dtype=np.float64)
         if is_sparse:
             qp_A = sp.csc_matrix(qp_A)
-            qp_G = sp.csc_matrix(qp_G)
-        qp_h = np.zeros(0, dtype=np.float64)
         qp_lb = np.zeros(dim, dtype=np.float64)
         qp_ub = np.ones(dim, dtype=np.float64)
         if is_sparse:
             solver = piqp.SparseSolver()
         else:
             solver = piqp.DenseSolver()
-        solver.settings.check_trafs_obj = True
+        # solver.settings.verbose = True
+
+        # disable preconditioner since it seems to cause problems in calculating
+        # primal_inf (i.e., primal_inf is small, but qp_G @ x <= qp_h is
+        # violated)
+        solver.settings.preconditioner_iter = 0
+        def term_cb(result):
+            i = result.info
+            return i.primal_inf < 1e-8 and GtG.dot(result.x).min() > 0
+        solver.settings.custom_term_cb = term_cb
         solver.settings.eps_abs = self.qp_eps
         solver.settings.eps_rel = self.qp_eps
         solver.settings.eps_duality_gap_abs = self.qp_eps
         solver.settings.eps_duality_gap_rel = self.qp_eps
-        # solver.settings.verbose = True
         solver.settings.max_iter = self.qp_iters
         solver.setup(qp_P, qp_c, qp_A, qp_b, qp_G, qp_h, qp_lb, qp_ub)
         solver.solve()
         return ret_from_gc(G.dot(projection_simplex(solver.result.x)))
+
+    def reduce_from_cvx_hull_qp_direct(
+            self, G: DenseOrSparse,
+            df_lb_thresh: float, norm_bound: float, state: dict) -> TRAFSStep:
+        """use a QP formulation to solve dx directly"""
+        xdim = G.shape[0]
+        qp_P = sp.eye(xdim, dtype=np.float64, format='csc')
+        qp_c = np.zeros(xdim, dtype=np.float64)
+        qp_A = sp.csc_matrix((0, xdim), dtype=np.float64)
+        qp_b = np.zeros(0, dtype=np.float64)
+        qp_G = sp.csc_matrix(G.T)
+        qp_h = np.full(G.shape[1], -1, dtype=np.float64)
+        qp_lb = np.full(xdim, -1e10, dtype=np.float64)
+        qp_ub = np.full(xdim, 1e10, dtype=np.float64)
+        solver = piqp.SparseSolver()
+        # solver.settings.verbose = True
+        solver.settings.preconditioner_scale_cost = True
+        solver.setup(qp_P, qp_c, qp_A, qp_b, qp_G, qp_h, qp_lb, qp_ub)
+        status = solver.solve()
+        if status in (piqp.PIQP_PRIMAL_INFEASIBLE,
+                      piqp.PIQP_DUAL_INFEASIBLE):
+            return TRAFSStep.make_zero(xdim, True)
+
+        info = solver.result.info
+        assert info.primal_obj >= info.dual_obj * (1 - 1e-6) > 0, (
+            info.primal_obj, info.dual_obj, info.primal_obj - info.dual_obj)
+        dx = solver.result.x.copy()
+        dx *= min(norm_bound, 1) / np.linalg.norm(dx, ord=2)
+        dx_dg = (dx @ G).max()
+        if dx_dg >= 0:
+            return TRAFSStep.make_zero(xdim, False)
+
+        df_lb = (-1 / np.sqrt(2 * info.dual_obj) * self.f_lb_norm_bound_mul *
+                 np.sqrt(xdim))
+        df_is_g = norm_bound <= self.df_g_norm_bound_thresh
+        return TRAFSStep(
+            dx=dx,
+            dx_dg=dx_dg,
+            df_lb=df_lb,
+            df_lb_is_global=df_is_g)
+
+    def reduce_from_box_socp(
+            self, G: DenseOrSparse, g_bias: npt.NDArray,
+            df_lb_thresh: float, norm_bound: float,
+            state: dict) -> TRAFSStep:
+        """Reduce to a subgradient given a box subdifferential defined as
+        ``g_bias + G @ p`` where ``0 <= p <= 1``.  Use an SOCP solver to compute
+        the result.
+        """
+        norm_bound = min(norm_bound, 1)
+        prev_Gb = state.get('box_prev_Gb')
+        def all_eq(a, b):
+            if a.shape != b.shape:
+                return False
+            if isinstance(a, np.ndarray):
+                return np.all(a == b)
+            else:
+                return (a != b).count_nonzero() == 0
+
+        xdim, pdim = G.shape
+        assert g_bias.shape == (xdim, )
+        if (prev_Gb is not None and all_eq(prev_Gb[0], G)
+                and all_eq(prev_Gb[1], g_bias)):
+            result = state['box_prev_result']
+        else:
+            cost_v = np.empty(xdim + pdim, dtype=np.float64)
+            cost_v[:xdim] = g_bias
+            cost_v[xdim:] = 1
+            result = (SOCPSolverBase.make(dim=xdim, dim_aux=pdim,
+                                          coeff_vec=cost_v)
+                      .add_ineq(G.T, np.arange(pdim, dtype=np.int32))
+                      .add_aux_lower(np.zeros(pdim, dtype=np.float64))
+                      .add_x_norm_bound()
+                      .solve())
+            state['box_prev_Gb'] = (G, g_bias)
+            state['box_prev_result'] = result
+
+        def dx_dg_fn(dx):
+            return (g_bias @ dx) + np.maximum(dx @ G, 0).sum()
+
+        return self.reduce_with_socp_result(
+            result, df_lb_thresh, norm_bound,
+            dx_dg_fn=dx_dg_fn
+        )

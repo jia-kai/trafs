@@ -16,7 +16,7 @@ if ! python -c 'import julia; julia.install()'; then
     exit 1
 fi
 
-if ! python -c 'import piqptr'; then
+if ( ! python -c 'import piqptr' ) || [ "$1" = "--piqp" ] ; then
     echo "Building the customized PIQP solver"
     cd third-party/piqp
     python setup.py build

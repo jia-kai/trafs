@@ -1,6 +1,6 @@
 from ..opt.shared import (UnconstrainedOptimizable, KnownLipschitzOptimizable,
                           LipschitzConstants, TRAFSStep)
-from .utils import UnconstrainedFuncSubDiffHelper
+from .utils import UnconstrainedFuncSubDiffHelper, print_once
 from ..utils import setup_pyx_import
 
 import numpy as np
@@ -8,7 +8,7 @@ import numpy.typing as npt
 import attrs
 
 with setup_pyx_import():
-    from .max_of_abs_utils import max_of_abs_subd
+    from .hmm_bench_utils import max_of_abs_subd
 
 class MaxOfAbs(UnconstrainedOptimizable, KnownLipschitzOptimizable):
     """Test problem taken from the paper Quasi-monotone Subgradient Methods for
@@ -49,12 +49,18 @@ class MaxOfAbs(UnconstrainedOptimizable, KnownLipschitzOptimizable):
                 return self._helper.reduce_with_min_grad(g, df_lb_thresh,
                                                          norm_bound)
 
-            # the QP and mosek solvers have some numerical issues near n = 16;
-            # Mosek 10.1.21 triggers an assertion (primal < dual) when n=20
-            # Clarabel seems more stable
-            return self._helper.reduce_from_cvx_hull_socp(
+            if self._helper.cvx_hull_prefer_socp or self.abs1.size > 100:
+                print_once('Use SOCP to solve dx')
+                return self._helper.reduce_from_cvx_hull_socp(
+                    G, df_lb_thresh, norm_bound, state,
+                    force_clarabel=True,
+                )
+
+            # QP primal is slower than clarabel for high dimensions but seems to
+            # have better solution quality
+            print_once('Use QP-direct to solve dx')
+            return self._helper.reduce_from_cvx_hull_qp_direct(
                 G, df_lb_thresh, norm_bound, state,
-                force_clarabel=True,
             )
 
     def __init__(self, n: int):
@@ -83,6 +89,9 @@ class MaxOfAbs(UnconstrainedOptimizable, KnownLipschitzOptimizable):
             L=np.sqrt(5),
             alpha=0,
             beta=0)
+
+    def get_optimal_value(self):
+        return 0.0
 
     def __repr__(self):
         return f'MaxOfAbs(n={self.x0.size})'
