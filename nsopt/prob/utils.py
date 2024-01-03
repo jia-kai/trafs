@@ -13,12 +13,13 @@ import typing
 
 import piqptr as piqp
 import clarabel
-try:
-    import mosek
-except ImportError:
+if os.getenv('NSOPT_USE_CLARABEL') == '1':
     mosek = None
-if os.getenv('NSOPT_USE_CLARABEL'):
-    mosek = None
+else:
+    try:
+        import mosek
+    except ImportError:
+        mosek = None
 
 print('Solver versions:\n'
       f' piqptr: {piqp.__version__}\n'
@@ -66,9 +67,9 @@ class SOCPSolverBase(metaclass=abc.ABCMeta):
     def add_x_lower(self, x_low: npt.NDArray) -> typing.Self:
         """add the constraint x >= x_low"""
 
+    @abc.abstractmethod
     def add_aux_lower(self, aux_low: npt.NDArray) -> typing.Self:
         """add the constraint u >= aux_low"""
-        raise NotImplementedError()
 
     @abc.abstractmethod
     def add_x_higher(self, x_high: npt.NDArray) -> typing.Self:
@@ -104,22 +105,19 @@ class SOCPSolverBase(metaclass=abc.ABCMeta):
 
     @classmethod
     def make(cls, dim: int, dim_aux: int = 1,
-             coeff_vec: typing.Optional[npt.NDArray] = None) -> "SOCPSolverBase":
+             coeff_vec: typing.Optional[npt.NDArray] = None,
+             force_clarabel=False) -> "SOCPSolverBase":
         # we do not use cvxpy because its compilation is too slow (each
         # iteration may have a different shape, which requires rebulding the
         # model and recompiling)
-        if dim_aux != 1 or coeff_vec is not None:
-            # I am too lazy to implement this case with mosek; clarabel works
-            # fine here
-            print_once('Use Clarabel as the SOCP solver with custom cost')
-            return ClarabelSOCPSolver(dim=dim, dim_aux=dim_aux,
-                                      coeff_vec=coeff_vec)
-        if mosek is not None:
+        if mosek is not None and not force_clarabel:
             print_once('Use MOSEK as the SOCP solver')
-            return MosekSOCPSolver(dim=dim)
+            return MosekSOCPSolver(dim=dim, dim_aux=dim_aux,
+                                   coeff_vec=coeff_vec)
         if clarabel is not None:
             print_once('Use Clarabel as the SOCP solver')
-            return ClarabelSOCPSolver(dim=dim)
+            return ClarabelSOCPSolver(dim=dim, dim_aux=dim_aux,
+                                      coeff_vec=coeff_vec)
         raise RuntimeError('no SOCP solver is available'
                            ' (need mosek or clarabel)')
 
@@ -297,7 +295,14 @@ class ClarabelSOCPSolver(SOCPSolverBase):
 @attrs.define
 class MosekSOCPSolver(SOCPSolverBase):
     dim: int
-    """dimension of the step vector (num of variables is ``dim + 1``)"""
+    """dimension of the step vector (num of variables is ``dim + dim_aux``)"""
+
+    dim_aux: int = 1
+    """number of auxiliary variables"""
+
+    coeff_vec: typing.Optional[npt.NDArray] = None
+    """coefficients of the cost function; if not specified, there must be a
+    single auxiliary variable and it is the cost"""
 
     verbose: bool = False
     """whether to print verbose output of the solver"""
@@ -307,6 +312,7 @@ class MosekSOCPSolver(SOCPSolverBase):
 
     _xlow: npt.NDArray = attrs.field(init=False, default=None)
     _xhigh: npt.NDArray = attrs.field(init=False, default=None)
+    _auxlow: npt.NDArray = attrs.field(init=False, default=None)
     _has_norm_bound: bool = False
 
     _lin_cons: int = 0
@@ -316,8 +322,14 @@ class MosekSOCPSolver(SOCPSolverBase):
         self._env = mosek.Env()
         task = self._env.Task(self.dim * 2, self.dim + 1)
         self._task = task
-        task.appendvars(self.dim + 1)
-        task.putcj(self.dim, 1) # minimize u, the last variable
+        task.appendvars(self.dim + self.dim_aux)
+        if self.coeff_vec is None:
+            task.putcj(self.dim, 1) # minimize u, the last variable
+        else:
+            assert self.coeff_vec.shape == (self.dim + self.dim_aux, )
+            task.putclist(np.arange(self.dim + self.dim_aux, dtype=np.int32),
+                          self.coeff_vec)
+
         task.putobjsense(mosek.objsense.minimize)
 
         ip = mosek.iparam
@@ -344,6 +356,11 @@ class MosekSOCPSolver(SOCPSolverBase):
         self._xhigh = x_high
         return self
 
+    def add_aux_lower(self, aux_low: npt.NDArray) -> typing.Self:
+        assert self._auxlow is None
+        self._auxlow = aux_low
+        return self
+
     def add_eq(self, v: npt.NDArray, b: npt.NDArray) -> typing.Self:
         # v @ x == b
         assert v.ndim == 2 and b.ndim == 1 and v.shape[0] == b.size
@@ -360,25 +377,40 @@ class MosekSOCPSolver(SOCPSolverBase):
 
     def add_ineq(self, g: DenseOrSparse, ui=None) -> typing.Self:
         # g @ x <= u
-        assert ui is None
         assert g.ndim == 2
         assert g.shape[1] == self.dim
+        nr_cons = g.shape[0]
+        if nr_cons == 0:
+            return self
+
         task = self._task
-        task.appendcons(g.shape[0])
+        task.appendcons(nr_cons)
         r = self._lin_cons
-        self._lin_cons += g.shape[0]
+        self._lin_cons += nr_cons
         if isinstance(g, np.ndarray):
             idx = np.arange(self.dim, dtype=np.int32)
             g = np.ascontiguousarray(g)
-            for i in range(g.shape[0]):
+            for i in range(nr_cons):
                 task.putarow(r + i, idx, g[i])
         else:
             g = g.tocoo()
             task.putaijlist(g.row + r, g.col, g.data)
 
-        for i in range(g.shape[0]):
-            task.putaij(r + i, self.dim, -1)
-            task.putconbound(r + i, mosek.boundkey.up, -np.inf, 0)
+        row_idx = np.arange(r, r + nr_cons, dtype=np.int32)
+
+        task.putconboundlist(row_idx, [mosek.boundkey.up] * nr_cons,
+                             np.full(nr_cons, -np.inf, dtype=np.float64),
+                             np.zeros(nr_cons, dtype=np.float64))
+        if ui is None:
+            ui = np.full(nr_cons, self.dim, dtype=np.int32)
+        else:
+            assert (ui.shape == (nr_cons, ) and
+                    ui.min() >= 0 and
+                    ui.max() < self.dim_aux and
+                    ui.dtype == np.int32)
+            ui = ui + self.dim
+
+        task.putaijlist(row_idx, ui, np.full(nr_cons, -1, dtype=np.float64))
         return self
 
     def add_socp(self, g: npt.NDArray, h: npt.NDArray) -> typing.Self:
@@ -438,14 +470,22 @@ class MosekSOCPSolver(SOCPSolverBase):
         }
         bc = [bc_map[(x_low is None, x_high is None)]] * self.dim
         if x_low is None:
-            x_low = np.empty(self.dim, dtype=np.float64)
-            x_low.fill(-np.inf)
+            x_low = np.full(self.dim, -np.inf, dtype=np.float64)
         if x_high is None:
-            x_high = np.empty(self.dim, dtype=np.float64)
-            x_high.fill(np.inf)
-        self._task.putvarboundlist(np.arange(self.dim, dtype=np.int32),
+            x_high = np.full(self.dim, np.inf, dtype=np.float64)
+
+        task = self._task
+        task.putvarboundlist(np.arange(self.dim, dtype=np.int32),
                                    bc, x_low, x_high)
-        self._task.putvarbound(self.dim, keyt.fr, -np.inf, np.inf)
+        if self._auxlow is None:
+            task.putvarbound(self.dim, keyt.fr, -np.inf, np.inf)
+        else:
+            assert self._auxlow.shape == (self.dim_aux, )
+            task.putvarboundlist(
+                np.arange(self.dim, self.dim + self.dim_aux, dtype=np.int32),
+                [keyt.lo] * self.dim_aux,
+                self._auxlow,
+                np.full(self.dim_aux, np.inf, dtype=np.float64))
 
     def solve(self) -> SOCPSolverBase.Result:
         self._setup_var_bound()
@@ -459,9 +499,10 @@ class MosekSOCPSolver(SOCPSolverBase):
             f'bad optimizer status: {status}')
 
         xx = task.getxx(mosek.soltype.itr)
-        x = np.ascontiguousarray(xx[:-1], dtype=np.float64)
+        x = np.ascontiguousarray(xx[:self.dim], dtype=np.float64)
         u = task.getprimalobj(mosek.soltype.itr)
-        np.testing.assert_allclose(xx[-1], task.getprimalobj(mosek.soltype.itr))
+        if self.coeff_vec is None:
+            np.testing.assert_allclose(xx[-1], u)
         dual_obj = task.getdualobj(mosek.soltype.itr)
         assert dual_obj <= u + 1.5e-6, (dual_obj, u, dual_obj - u)
         dual_obj = min(dual_obj, u)
@@ -567,12 +608,8 @@ class UnconstrainedFuncSubDiffHelper:
         if prev_G is not None and prev_G.shape == G.shape and all_eq(prev_G, G):
             result = state['cvx_hull_prev_result']
         else:
-            if force_clarabel:
-                assert clarabel is not None, 'Clarabel is required'
-                solver_factory = ClarabelSOCPSolver
-            else:
-                solver_factory = SOCPSolverBase.make
-            result = (solver_factory(dim=xdim)
+            result = (SOCPSolverBase.make(dim=xdim,
+                                          force_clarabel=force_clarabel)
                       .add_ineq(G.T)
                       .add_x_norm_bound()
                       .solve())
@@ -581,13 +618,15 @@ class UnconstrainedFuncSubDiffHelper:
 
         return self.reduce_with_socp_result(
             result, df_lb_thresh, norm_bound,
-            dx_dg_fn=lambda dx: (dx @ G).max()
+            dx_dg_fn=lambda dx: (dx @ G).max(),
+            state=state,
         )
 
     def reduce_with_socp_result(
             self, result: SOCPSolverBase.Result,
             df_lb_thresh: float, norm_bound: float,
-            dx_dg_fn: typing.Callable[[npt.NDArray], float]) -> TRAFSStep:
+            dx_dg_fn: typing.Callable[[npt.NDArray], float],
+            state: dict) -> TRAFSStep:
         """get the TRAFS step from the result of an SOCP solver that solves
 
                 min_{x in B[1]} max_{g in G} d @ g
@@ -596,7 +635,18 @@ class UnconstrainedFuncSubDiffHelper:
         df_lb = result.dobj * self.f_lb_norm_bound_mul * np.sqrt(xdim)
         result = result * norm_bound
         dx_dg = dx_dg_fn(result.x)
-        np.testing.assert_allclose(dx_dg, result.pobj, atol=1e-6, rtol=1e-6)
+
+        obj_chk = int(np.allclose(dx_dg, result.pobj, atol=1e-6, rtol=1e-6))
+        if 'socp_obj_chk_succ' not in state:
+            state['socp_obj_chk_succ'] = 0
+            state['socp_obj_chk_tot'] = 0
+
+        state['socp_obj_chk_succ'] += obj_chk
+        state['socp_obj_chk_tot'] += 1
+        if state['socp_obj_chk_succ'] / state['socp_obj_chk_tot'] < 0.8:
+            np.testing.assert_allclose(dx_dg, result.pobj, atol=1e-6, rtol=1e-6)
+            raise RuntimeError('socp result is incorrect')
+
         assert dx_dg >= result.dobj - 2e-7, (
             dx_dg, result.dobj, result.dobj - dx_dg)
 
@@ -721,7 +771,8 @@ class UnconstrainedFuncSubDiffHelper:
     def reduce_from_box_socp(
             self, G: DenseOrSparse, g_bias: npt.NDArray,
             df_lb_thresh: float, norm_bound: float,
-            state: dict) -> TRAFSStep:
+            state: dict,
+            force_clarabel=False) -> TRAFSStep:
         """Reduce to a subgradient given a box subdifferential defined as
         ``g_bias + G @ p`` where ``0 <= p <= 1``.  Use an SOCP solver to compute
         the result.
@@ -745,8 +796,9 @@ class UnconstrainedFuncSubDiffHelper:
             cost_v = np.empty(xdim + pdim, dtype=np.float64)
             cost_v[:xdim] = g_bias
             cost_v[xdim:] = 1
-            result = (SOCPSolverBase.make(dim=xdim, dim_aux=pdim,
-                                          coeff_vec=cost_v)
+            result = (SOCPSolverBase.make(
+                        dim=xdim, dim_aux=pdim, coeff_vec=cost_v,
+                        force_clarabel=force_clarabel)
                       .add_ineq(G.T, np.arange(pdim, dtype=np.int32))
                       .add_aux_lower(np.zeros(pdim, dtype=np.float64))
                       .add_x_norm_bound()
@@ -759,5 +811,6 @@ class UnconstrainedFuncSubDiffHelper:
 
         return self.reduce_with_socp_result(
             result, df_lb_thresh, norm_bound,
-            dx_dg_fn=dx_dg_fn
+            dx_dg_fn=dx_dg_fn,
+            state=state,
         )

@@ -181,8 +181,12 @@ class ChainedLQ(UnconstrainedOptimizable):
 
             g_base = self.base_grad.copy()
             G = chained_lq_subd(subg_slack, g_base, self.x, self.comp)
+
+            # clarabel performs better on sparse problems
             return self._helper.reduce_from_box_socp(
-                G, g_base, df_lb_thresh, norm_bound, state)
+                G, g_base, df_lb_thresh, norm_bound, state,
+                force_clarabel=True,
+            )
 
 
     def __init__(self, n: int):
