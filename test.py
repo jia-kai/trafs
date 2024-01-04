@@ -6,7 +6,7 @@ from nsopt.opt.shared import (
     Optimizable, ProximalGradOptimizable, UnconstrainedOptimizable)
 from nsopt.prob.utils import make_stable_rng
 from nsopt.prob import (LassoRegression, LassoClassification, MaxOfAbs,
-                        MaxQ, MXHILB, ChainedLQ, ChainedCB3I,
+                        MaxQ, MXHILB, ChainedLQ, ChainedCB3I, ChainedCB3II,
                         DistanceGame)
 with setup_pyx_import():
     from nsopt.prob.kernels import sum_of_max_subd_mask
@@ -14,7 +14,7 @@ with setup_pyx_import():
 import unittest
 import itertools
 
-SIMPLE_PROBS = [MaxQ, MXHILB, ChainedLQ, ChainedCB3I]
+SIMPLE_PROBS = [MaxQ, MXHILB, ChainedLQ, ChainedCB3I, ChainedCB3II]
 
 class TestCaseWithRng(unittest.TestCase):
     def setUp(self):

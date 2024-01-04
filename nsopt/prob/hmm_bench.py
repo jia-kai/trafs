@@ -10,6 +10,7 @@ from ..utils import setup_pyx_import
 import numpy as np
 import numpy.typing as npt
 import attrs
+import typing
 
 with setup_pyx_import():
     from .kernels import (
@@ -230,7 +231,7 @@ class ChainedCB3I(UnconstrainedOptimizable):
     @attrs.frozen
     class SubDiff(UnconstrainedOptimizable.SubDiff):
         _helper = UnconstrainedFuncSubDiffHelper(
-            socp_check_succ_rate=0.5,
+            socp_check_succ_rate=0.6,
         )
 
         x: npt.NDArray
@@ -298,3 +299,94 @@ class ChainedCB3I(UnconstrainedOptimizable):
 
     def __repr__(self):
         return f'ChainedCB3I(n={self.x0.size})'
+
+
+class ChainedCB3II(UnconstrainedOptimizable):
+    """max sum(x_i^4 + x_{i+1}^2, (2-x_i)^2 + (2-x_{i+1})^2,
+        2e^{-x_i + x_{i+1}})"""
+    x0: npt.NDArray
+
+    pgd_default_lr = 1e-2
+
+    @attrs.frozen
+    class SubDiff(UnconstrainedOptimizable.SubDiff):
+        _helper = UnconstrainedFuncSubDiffHelper()
+
+        grads_fn: list[typing.Callable[[], npt.NDArray]]
+        """callables to compute the component gradients"""
+
+        comp: npt.NDArray
+        """[3] array of the components"""
+
+        def take_arbitrary(self):
+            return self.grads_fn[np.argmax(self.comp)]()
+
+        def reduce_trafs(
+                self,
+                subg_slack: float, df_lb_thresh: float, norm_bound: float,
+                state: dict) -> TRAFSStep:
+            comp = self.comp
+            grads_fn = self.grads_fn
+            fval = comp.max()
+            act_mask = (fval - comp) <= subg_slack
+            G = []
+            for i in range(comp.size):
+                if act_mask[i]:
+                    G.append(grads_fn[i]())
+
+            if len(G) == 1:
+                return self._helper.reduce_with_min_grad(
+                    G[0], df_lb_thresh, norm_bound)
+
+            G = np.stack(G, axis=1)
+            return self._helper.reduce_from_cvx_hull_qp(
+                G, df_lb_thresh, norm_bound, state,
+            )
+
+    def __init__(self, n: int):
+        self.x0 = np.full(n, 2, dtype=np.float64)
+
+    def eval(self, x: npt.NDArray, *, need_grad=False):
+        xi = x[:-1]
+        xi1 = x[1:]
+        c0 = np.power(xi, 4) + np.square(xi1)
+        c1 = np.square(2 - xi) + np.square(2 - xi1)
+        c2 = 2 * np.exp(xi1 - xi)
+        comp = np.array([c0.sum(), c1.sum(), c2.sum()], dtype=np.float64)
+        fval = comp.max()
+
+        def g0():
+            g = np.zeros_like(x)
+            g[:-1] += 4 * np.power(xi, 3)
+            g[1:] += 2 * xi1
+            return g
+        def g1():
+            g = np.zeros_like(x)
+            g[:-1] -= 4 - 2 * xi
+            g[1:] -= 4 - 2 * xi1
+            return g
+        def g2():
+            g = np.zeros_like(x)
+            g[:-1] -= c2
+            g[1:] += c2
+            return g
+
+        if need_grad:
+            return fval, self.SubDiff([g0, g1, g2], comp)
+        else:
+            return fval
+
+    def eval_batch(self, x: npt.NDArray):
+        xi = np.ascontiguousarray(x[:, :-1])
+        xi1 = np.ascontiguousarray(x[:, 1:])
+        c0 = (np.power(xi, 4) + np.square(xi1)).sum(axis=1)
+        c1 = (np.square(2 - xi) + np.square(2 - xi1)).sum(axis=1)
+        c2 = (2 * np.exp(xi1 - xi)).sum(axis=1)
+        fval = np.maximum(np.maximum(c0, c1), c2)
+        return fval
+
+    def get_optimal_value(self):
+        return 2 * (self.x0.size - 1)
+
+    def __repr__(self):
+        return f'ChainedCB3II(n={self.x0.size})'
