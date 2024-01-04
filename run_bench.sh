@@ -2,7 +2,9 @@
 
 set -u -e
 
-declare -a PROBS=( SPL DPL LLR LLC DG )
+cd $(dirname $0)
+PROBS=$(./run_bench.py --show-probs -o0 -pDG -i0 -s0 |
+    awk '/Problem classes/ {flag=1; next} flag')
 BENCH_SIZE=50
 OUTDIR=bench-out
 
@@ -19,8 +21,8 @@ mkdir -p $OUTDIR
 
 parallel -j $nr_par --colsep '-' --lb --eta --progress "$@" \
     --argfile=<(
-for i in  "${PROBS[@]}"; do
-    for j in $(seq 0 $(( $BENCH_SIZE-1 ))); do
+for j in $(seq 0 $(( $BENCH_SIZE-1 )) | tac); do
+    for i in $PROBS; do
         printf '%s-%02d\n' $i $j
     done
 done) bash -c "\" \

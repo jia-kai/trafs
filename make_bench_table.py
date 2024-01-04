@@ -105,7 +105,9 @@ class BenchmarkSummarizer:
                 with (bench_dir / f'{prob}.{i:02d}.pkl').open('rb') as f:
                     r = pickle.load(f)
                     assert isinstance(r, dict)
-                    for v in r.values():
+                    for k, v in r.items():
+                        if k == 'optimal':
+                            continue
                         assert isinstance(v, OptimizationResult)
                         v.fval_hist[-1] = v.fval
                         v.iter_times[-1] = v.time
@@ -128,20 +130,38 @@ class BenchmarkSummarizer:
         )
         table = []
 
-        for prob_i, prob in enumerate(['SPL', 'DPL', 'LLR', 'LLC', 'DG']):
-            results = self.results[prob]
-            methods = [i for i in self.METHOD_DISP_NAMES.keys()
-                       if i in results[0]]
+        for prob_i, prob in enumerate(itertools.chain(
+                ProbMakers.all_makers().keys(),
+                ['All'])):
+            results: list[dict[str, OptimizationResult]]
+            methods: list[str]
+            if prob != 'All':
+                results = self.results[prob]
+                methods = [i for i in self.METHOD_DISP_NAMES.keys()
+                           if i in results[0]]
+            else:
+                results = list(itertools.chain(*self.results.values()))
+                available = set(results[0].keys())
+                for r in self.results.values():
+                    available &= set(r[0].keys())
+                methods = [i for i in self.METHOD_DISP_NAMES.keys()
+                           if i in available]
+
             row_headers.extend(itertools.product(
                 [prob],
                 [self.METHOD_DISP_NAMES[i] for i in methods]
             ))
-            if prob_i < 2:
-                fopts = np.zeros(len(results))
-            else:
-                fopts = np.array(
-                    [min(i.fval for i in r.values()) for r in results]
-                )
+
+            def reduce_opt(r: dict[str, OptimizationResult]) -> float:
+                r1 = min(v.fval for k, v in r.items() if k != 'optimal')
+                r2 = r['optimal']
+                if r2 is None:
+                    assert prob_i > 5
+                    return r1
+                assert r1 >= r2
+                return r2
+
+            fopts = np.array([reduce_opt(r) for r in results], dtype=np.float64)
 
             sub_table = np.empty((len(methods), len(col_headers)), dtype=object)
 
@@ -151,9 +171,16 @@ class BenchmarkSummarizer:
 
             col = len(self.eps_split) * 3
             for meth_i, meth_name in enumerate(methods):
-                meth_iter = [r[meth_name].iters for r in results]
-                meth_time = [r[meth_name].time for r in results]
-                meth_fval = np.array([r[meth_name].fval for r in results])
+                meth_iter = []
+                meth_time = []
+                meth_fval = []
+                for r in results:
+                    mr = r[meth_name]
+                    meth_iter.append(mr.iters)
+                    meth_time.append(mr.time)
+                    meth_fval.append(mr.fval)
+
+                meth_fval = np.array(meth_fval, dtype=np.float64)
                 meth_gap = (meth_fval - fopts) / (1 + np.abs(fopts))
                 sub_table[meth_i, col] = '{:.0f}'.format(np.mean(meth_iter))
                 sub_table[meth_i, col + 1] = Number(np.mean(meth_time))
@@ -196,6 +223,7 @@ class BenchmarkSummarizer:
                     si.append(2**30)
                     st.append(2**30)
                     sm.append(False)
+
             sm = np.array(sm, dtype=bool)
             if method == 'trafs' and not np.all(sm):
                 fail_i = np.where(~sm)
@@ -203,6 +231,7 @@ class BenchmarkSummarizer:
             solve_iter.append(si)
             solve_time.append(st)
             solve_mask.append(sm)
+
         solve_iter = np.array(solve_iter, dtype=np.int32)
         solve_time = np.array(solve_time, dtype=np.float64)
         solve_mask = np.array(solve_mask, dtype=bool)
@@ -412,6 +441,7 @@ def main():
     latex = (LatexTableProc(latex)
              .remove_table_last_cline()
              .fix_cline()
+             .add_multirow_header(2, 'Problem', 'Method')
              .as_str())
 
     with open(args.output, 'w') as fout:

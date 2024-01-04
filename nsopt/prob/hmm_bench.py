@@ -231,7 +231,7 @@ class ChainedCB3I(UnconstrainedOptimizable):
     @attrs.frozen
     class SubDiff(UnconstrainedOptimizable.SubDiff):
         _helper = UnconstrainedFuncSubDiffHelper(
-            socp_check_succ_rate=0.6,
+            socp_check_succ_rate=0.3,
         )
 
         x: npt.NDArray

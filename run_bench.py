@@ -46,14 +46,34 @@ def geo_interp(a: float, b: float, t: float) -> float:
 
 class ProbMakers:
     @classmethod
-    def SPL(cls, spec: ProbSpec):
+    def MAXQ(cls, spec: ProbSpec):
         n = int_interp(10, 5000, spec.idx_ratio)
-        return nsopt.prob.MaxOfAbs(n)
+        return nsopt.prob.MaxQ(n)
 
     @classmethod
     def DPL(cls, spec: ProbSpec):
         n = int_interp(10, 1200, spec.idx_ratio)
-        return nsopt.prob.GeneralizedMXHILB(n)
+        return nsopt.prob.MXHILB(n)
+
+    @classmethod
+    def CLQ(cls, spec: ProbSpec):
+        n = int_interp(10, 1200, spec.idx_ratio)
+        return nsopt.prob.ChainedLQ(n)
+
+    @classmethod
+    def CCB3A(cls, spec: ProbSpec):
+        n = int_interp(10, 1200, spec.idx_ratio)
+        return nsopt.prob.ChainedCB3I(n)
+
+    @classmethod
+    def CCB3B(cls, spec: ProbSpec):
+        n = int_interp(10, 5000, spec.idx_ratio)
+        return nsopt.prob.ChainedCB3II(n)
+
+    @classmethod
+    def SPL(cls, spec: ProbSpec):
+        n = int_interp(10, 5000, spec.idx_ratio)
+        return nsopt.prob.MaxOfAbs(n)
 
     @classmethod
     def LLR(cls, spec: ProbSpec):
@@ -93,7 +113,7 @@ class ProbMakers:
 
     @classmethod
     def all_makers(cls) -> dict[str, typing.Callable[[ProbSpec], Optimizable]]:
-        return {name: getattr(cls, name) for name in dir(cls)
+        return {name: getattr(cls, name) for name in cls.__dict__.keys()
                 if name.isupper() and callable(getattr(cls, name))}
 
 def main():
@@ -112,13 +132,21 @@ def main():
         help='total number of instances in the benchmark of this problem')
     parser.add_argument('--seed', type=int, default=42,
                         help='random seed')
+    parser.add_argument('--show-probs', action='store_true',
+                        help='print the problem classes one per line and exit')
     MethodFactory(None).setup_parser(parser, default_max_iters=50000)
     args = parser.parse_args()
+    if args.show_probs:
+        print('Problem classes:')
+        print('\n'.join(makers.keys()))
+        return
+
     assert 0 <= args.idx < args.bench_size
 
     spec = ProbSpec(seed=args.seed, idx=args.idx, bench_size=args.bench_size)
     prob = makers[args.prob_name](spec)
     results = MethodFactory(type(prob)).run_solvers(args, prob)
+    results['optimal'] = prob.get_optimal_value()
     with open(args.output, 'wb') as f:
         pickle.dump(results, f, protocol=pickle.HIGHEST_PROTOCOL)
 

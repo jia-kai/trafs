@@ -281,7 +281,8 @@ class ClarabelSOCPSolver(SOCPSolverBase):
         # CLARABEL does not return the dual objective value; we have to compute
         # it ourselves
         dual_obj = -b @ solution.z
-        assert dual_obj <= u + 1e-8, (dual_obj, u, dual_obj - u)
+        assert dual_obj <= u + 1e-7, (dual_obj, u, dual_obj - u)
+        dual_obj = min(dual_obj, u) # numerical error may cause dual_obj > u
 
         if solution.status == S.Solved:
             np.testing.assert_allclose(dual_obj, u, atol=1e-6, rtol=1e-6)
@@ -553,7 +554,7 @@ class UnconstrainedFuncSubDiffHelper:
     """maximum norm bound for the current lower bound of df to be considered as
     global"""
 
-    gc_norm_zthresh: float = 1e-9
+    gc_norm_zthresh: float = 1e-7
     """consider the gradient as zero if its norm is smaller than this value"""
 
     f_lb_norm_bound_mul: float = 1
@@ -751,7 +752,10 @@ class UnconstrainedFuncSubDiffHelper:
         solver.settings.preconditioner_iter = 0
         def term_cb(result):
             i = result.info
-            return i.primal_inf < 1e-8 and GtG.dot(result.x).min() > 0
+            if i.primal_inf > 1e-8:
+                return False
+            return (i.primal_obj < self.gc_norm_zthresh**2 or
+                    GtG.dot(result.x).min() > 0)
         solver.settings.custom_term_cb = term_cb
         solver.settings.eps_abs = self.qp_eps
         solver.settings.eps_rel = self.qp_eps
