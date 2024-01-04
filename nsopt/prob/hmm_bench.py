@@ -7,14 +7,13 @@ from ..opt.shared import UnconstrainedOptimizable, LipschitzConstants, TRAFSStep
 from .utils import UnconstrainedFuncSubDiffHelper, mosek, print_once
 from ..utils import setup_pyx_import
 
-import scipy.sparse as sp
 import numpy as np
 import numpy.typing as npt
 import attrs
 
 with setup_pyx_import():
-    from .hmm_bench_utils import (
-        mxhilb_comp_batch, mxhilb_subd, chained_lq_subd)
+    from .kernels import (
+        mxhilb_comp_batch, mxhilb_subd, chained_lq_subd, chained_cb3_I_subd)
 
 class MaxQ(UnconstrainedOptimizable):
     """max x_i^2"""
@@ -155,23 +154,28 @@ class MXHILB(UnconstrainedOptimizable):
 
 
 class ChainedLQ(UnconstrainedOptimizable):
-    """-x_i - x_{i+1} + max (x_i^2 + x_{i+1}^2 - 1, 0)"""
+    """max (-x_i - x_{i+1}, -x_i - x_{i+1} + x_i^2 + x_{i+1}^2 - 1)"""
     x0: npt.NDArray
 
     @attrs.frozen
     class SubDiff(UnconstrainedOptimizable.SubDiff):
-        _helper = UnconstrainedFuncSubDiffHelper()
+        _helper = UnconstrainedFuncSubDiffHelper(
+            socp_check_succ_rate=0.8,
+        )
 
-        base_grad: npt.NDArray
         x: npt.NDArray
         comp: npt.NDArray
-        """x_i^2 + x_{i+1}^2 - 1"""
+        """[n, 2] array of the components of the max"""
 
         def take_arbitrary(self):
-            act_idx = np.flatnonzero(self.comp >= 0)
-            ret = self.base_grad.copy()
-            ret[act_idx] += 2 * self.x[act_idx]
-            ret[act_idx + 1] += 2 * self.x[act_idx + 1]
+            act_idx = np.argmax(self.comp, axis=1)
+            ret = np.zeros_like(self.x)
+            act0 = np.flatnonzero(act_idx == 0)
+            act1 = np.flatnonzero(act_idx == 1)
+            ret[act0] += -1
+            ret[act0 + 1] += -1
+            ret[act1] += -1 + 2 * self.x[act1]
+            ret[act1 + 1] += -1 + 2 * self.x[act1 + 1]
             return ret
 
         def reduce_trafs(
@@ -179,12 +183,11 @@ class ChainedLQ(UnconstrainedOptimizable):
                 subg_slack: float, df_lb_thresh: float, norm_bound: float,
                 state: dict) -> TRAFSStep:
 
-            g_base = self.base_grad.copy()
-            G = chained_lq_subd(subg_slack, g_base, self.x, self.comp)
+            desc = chained_lq_subd(subg_slack, self.x, self.comp)
 
             # clarabel performs better on sparse problems
-            return self._helper.reduce_from_box_socp(
-                G, g_base, df_lb_thresh, norm_bound, state,
+            return self._helper.reduce_from_multi_cvx_hull_socp(
+                desc, df_lb_thresh, norm_bound, state,
                 force_clarabel=True,
             )
 
@@ -194,13 +197,12 @@ class ChainedLQ(UnconstrainedOptimizable):
 
     def eval(self, x: npt.NDArray, *, need_grad=False):
         x2 = np.square(x)
-        comp = x2[:-1] + x2[1:] - 1
-        fval = -x.sum() * 2 + x[0] + x[-1] + np.maximum(comp, 0).sum()
+        c0 = -x[:-1] - x[1:]
+        c1 = c0 + x2[:-1] + x2[1:] - 1
+        fval = np.maximum(c0, c1).sum()
         if need_grad:
-            base_grad = np.full_like(x, -2, dtype=np.float64)
-            base_grad[0] = -1
-            base_grad[-1] = -1
-            return fval, self.SubDiff(base_grad, x, comp)
+            comp = np.stack([c0, c1], axis=1)
+            return fval, self.SubDiff(x, comp)
         else:
             return fval
 
@@ -216,3 +218,83 @@ class ChainedLQ(UnconstrainedOptimizable):
 
     def __repr__(self):
         return f'ChainedLQ(n={self.x0.size})'
+
+
+class ChainedCB3I(UnconstrainedOptimizable):
+    """max(x_i^4 + x_{i+1}^2, (2-x_i)^2 + (2-x_{i+1})^2,
+        2e^{-x_i + x_{i+1}})"""
+    x0: npt.NDArray
+
+    pgd_default_lr = 1e-2
+
+    @attrs.frozen
+    class SubDiff(UnconstrainedOptimizable.SubDiff):
+        _helper = UnconstrainedFuncSubDiffHelper(
+            socp_check_succ_rate=0.5,
+        )
+
+        x: npt.NDArray
+        comp: npt.NDArray
+        """[n, 3] array of the components"""
+
+        def take_arbitrary(self):
+            cidx = np.argmax(self.comp, axis=1)
+            act0 = np.flatnonzero(cidx == 0)
+            act1 = np.flatnonzero(cidx == 1)
+            act2 = np.flatnonzero(cidx == 2)
+            grad = np.zeros_like(self.x)
+            x = self.x
+
+            grad[act0] += 4 * np.power(x[act0], 3)
+            grad[act0 + 1] += 2 * x[act0 + 1]
+
+            grad[act1] -= 4 - 2 * x[act1]
+            grad[act1 + 1] -= 4 - 2 * x[act1 + 1]
+
+            c2 = self.comp[act2, 2]
+            grad[act2] -= c2
+            grad[act2 + 1] += c2
+
+            return grad
+
+        def reduce_trafs(
+                self,
+                subg_slack: float, df_lb_thresh: float, norm_bound: float,
+                state: dict) -> TRAFSStep:
+            desc = chained_cb3_I_subd(subg_slack, self.x, self.comp)
+
+            return self._helper.reduce_from_multi_cvx_hull_socp(
+                desc, df_lb_thresh, norm_bound, state,
+                force_clarabel=True,
+            )
+
+    def __init__(self, n: int):
+        self.x0 = np.full(n, 2, dtype=np.float64)
+
+    def eval(self, x: npt.NDArray, *, need_grad=False):
+        xi = x[:-1]
+        xi1 = x[1:]
+        c0 = np.power(xi, 4) + np.square(xi1)
+        c1 = np.square(2 - xi) + np.square(2 - xi1)
+        c2 = 2 * np.exp(xi1 - xi)
+        fval = np.maximum(np.maximum(c0, c1), c2).sum()
+        if need_grad:
+            comp = np.stack([c0, c1, c2], axis=1)
+            return fval, self.SubDiff(x, comp)
+        else:
+            return fval
+
+    def eval_batch(self, x: npt.NDArray):
+        xi = x[:, :-1]
+        xi1 = x[:, 1:]
+        c0 = np.power(xi, 4) + np.square(xi1)
+        c1 = np.square(2 - xi) + np.square(2 - xi1)
+        c2 = 2 * np.exp(xi1 - xi)
+        fval = np.maximum(np.maximum(c0, c1), c2).sum(axis=1)
+        return fval
+
+    def get_optimal_value(self):
+        return 2 * (self.x0.size - 1)
+
+    def __repr__(self):
+        return f'ChainedCB3I(n={self.x0.size})'

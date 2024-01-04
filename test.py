@@ -1,16 +1,20 @@
 import scipy.optimize as spo
 import numpy as np
 
+from nsopt.utils import setup_pyx_import
 from nsopt.opt.shared import (
     Optimizable, ProximalGradOptimizable, UnconstrainedOptimizable)
 from nsopt.prob.utils import make_stable_rng
 from nsopt.prob import (LassoRegression, LassoClassification, MaxOfAbs,
-                        MaxQ, ChainedLQ, MXHILB, DistanceGame)
+                        MaxQ, MXHILB, ChainedLQ, ChainedCB3I,
+                        DistanceGame)
+with setup_pyx_import():
+    from nsopt.prob.kernels import sum_of_max_subd_mask
 
 import unittest
 import itertools
 
-SIMPLE_PROBS = [MaxQ, MXHILB, ChainedLQ]
+SIMPLE_PROBS = [MaxQ, MXHILB, ChainedLQ, ChainedCB3I]
 
 class TestCaseWithRng(unittest.TestCase):
     def setUp(self):
@@ -145,3 +149,64 @@ class TestL1SubDiff(TestCaseWithRng):
         pen = self.rng.uniform(slack / 2 + 1e-4, slack, n)
         pen[idx] = self.rng.uniform(thresh, thresh * 1.01, len(idx))
         self._check_subg(pen, idx)
+
+
+class TestProbKernels(TestCaseWithRng):
+    def test_sum_of_max_subd_mask(self):
+        def compute(slack, comp):
+            slack = float(slack)
+            ncomp, ncol = comp.shape
+            cidx = np.argsort(-comp, axis=1)    # cidx is descending order
+            mask = 1 << cidx[:, 0]
+
+            items = []
+
+            def append_item(r, c):
+                c0, c1 = cidx[r, c:c + 2]
+                items.append((comp[r, c0] - comp[r, c1], r, c + 1))
+
+            for i in range(ncomp):
+                append_item(i, 0)
+
+            items.sort(reverse=True)
+            while slack > 0 and items:
+                cur_slack, sum_i, scol = items.pop()
+                if slack < cur_slack:
+                    break
+                slack -= cur_slack
+                mask[sum_i] |= 1 << cidx[sum_i, scol]
+                if scol + 1 < ncol:
+                    append_item(sum_i, scol)
+                    items.sort(reverse=True)
+            return mask
+
+        def run(slack, comp):
+            slack = float(slack)
+            comp = np.ascontiguousarray(comp, dtype=np.float64)
+            mask_get = sum_of_max_subd_mask(slack, comp)
+            mask_expect = compute(slack, comp)
+            with self.subTest(slack=slack, comp=comp):
+                np.testing.assert_allclose(mask_get, mask_expect)
+            return mask_get
+
+        run(1, [
+            [1, 2, 2.9],
+            [4, 5.1, 6],
+        ])
+        run(slack=100,
+            comp=[[-0.6,  0.1,  0.6],
+                  [ 0.2,  2.5, -2]])
+
+        for ncol in [2, 3]:
+            mask_used = np.zeros(2**ncol, dtype=bool)
+            for size in range(2, 100):
+                comp = self.rng.standard_normal((size, ncol))
+                slack = (comp.max() - comp.min()) * self.rng.uniform(.01, .8)
+                mask_used[run(slack, comp)] = True
+                t = run(comp.max(axis=1).sum() - comp.min(axis=1).sum() + 1e-7,
+                        comp)
+                np.testing.assert_allclose(t, 2**ncol - 1)
+
+            expect_used = np.ones_like(mask_used)
+            expect_used[0] = False
+            np.testing.assert_allclose(mask_used, expect_used)

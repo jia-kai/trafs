@@ -5,7 +5,7 @@ from nsopt import setup_threads
 setup_threads()
 
 from nsopt.opt import MethodFactory
-from nsopt.prob import MaxOfAbs, MaxQ, MXHILB, ChainedLQ
+from nsopt.prob import MaxOfAbs, MaxQ, MXHILB, ChainedLQ, ChainedCB3I
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -17,6 +17,7 @@ prob_map = {
     'mxhilb': MXHILB,
     'maxq': MaxQ,
     'clq': ChainedLQ,
+    'ccb3i': ChainedCB3I,
 }
 
 def main():

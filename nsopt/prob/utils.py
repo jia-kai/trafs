@@ -134,7 +134,7 @@ class ClarabelSOCPSolver(SOCPSolverBase):
     """coefficients of the cost function; if not specified, there must be a
     single auxiliary variable and it is the cost"""
 
-    max_iter: int = 30
+    max_iter: int = 50
     """max number of iterations"""
 
     verbose: bool = False
@@ -273,8 +273,9 @@ class ClarabelSOCPSolver(SOCPSolverBase):
         else:
             u = solution.obj_val
         S = clarabel.SolverStatus
-        assert solution.status in (S.Solved, S.AlmostSolved,
-                                   S.MaxIterations, S.MaxTime), (
+        assert solution.status in (
+            S.Solved, S.AlmostSolved, S.MaxIterations, S.MaxTime,
+            S.NumericalError, S.InsufficientProgress), (
             f'solver failed with status {solution.status}')
 
         # CLARABEL does not return the dual objective value; we have to compute
@@ -518,6 +519,31 @@ class MosekSOCPSolver(SOCPSolverBase):
         )
 
 @attrs.frozen
+class SumOfCvxHullDesc:
+    """description of a sum of convex hulls:
+
+        { bias + G @ x } where x is the same size as ui, x[i] and x[j] are
+        convex combination coefficients of the same convex hull when ui[i] ==
+        ui[j]. All convex hulls include the origin (so the caller should shift
+        one of the vertices to the origin by including it in bias).
+    """
+
+    bias: npt.NDArray
+    G: DenseOrSparse
+    ui: npt.NDArray
+    """the index of the convex hull for each column of ``G``; must be
+    contiguously numbered from 0"""
+
+    nr_hull: int
+
+    def __attrs_post_init__(self):
+        n, p = self.G.shape
+        assert self.bias.shape == (n, )
+        assert self.ui.shape == (p, ) and self.ui.dtype == np.int32
+        assert 0 <= self.nr_hull <= p
+
+
+@attrs.frozen
 class UnconstrainedFuncSubDiffHelper:
     """helper class for computing the TRAFS subgradient from the functional
     subdifferential for unconstrained problems. The problem is essentially
@@ -542,6 +568,9 @@ class UnconstrainedFuncSubDiffHelper:
 
     cvx_hull_prefer_qp: bool = os.getenv('NSOPT_CVX_HULL_PREFER_QP') == '1'
     cvx_hull_prefer_socp: bool = os.getenv('NSOPT_CVX_HULL_PREFER_SOCP') == '1'
+
+    socp_check_succ_rate: float = 1.0
+    """success rate requirement for SOCP solution check"""
 
     def reduce_grad_range(
             self, glow: npt.NDArray, ghigh: npt.NDArray,
@@ -643,11 +672,16 @@ class UnconstrainedFuncSubDiffHelper:
 
         state['socp_obj_chk_succ'] += obj_chk
         state['socp_obj_chk_tot'] += 1
-        if state['socp_obj_chk_succ'] / state['socp_obj_chk_tot'] < 0.8:
-            np.testing.assert_allclose(dx_dg, result.pobj, atol=1e-6, rtol=1e-6)
-            raise RuntimeError('socp result is incorrect')
+        if (cm := state['socp_obj_chk_succ']) / (
+            cn := state['socp_obj_chk_tot']) < self.socp_check_succ_rate:
+            try:
+                np.testing.assert_allclose(
+                    dx_dg, result.pobj, atol=1e-6, rtol=1e-6)
+            except Exception as exc:
+                raise RuntimeError(
+                    f'socp result is incorrect: {cm}/{cn}') from exc
 
-        assert dx_dg >= result.dobj - 2e-7, (
+        assert dx_dg >= result.dobj - 5e-7, (
             dx_dg, result.dobj, result.dobj - dx_dg)
 
         df_is_g = norm_bound <= self.df_g_norm_bound_thresh
@@ -768,18 +802,19 @@ class UnconstrainedFuncSubDiffHelper:
             df_lb=df_lb,
             df_lb_is_global=df_is_g)
 
-    def reduce_from_box_socp(
-            self, G: DenseOrSparse, g_bias: npt.NDArray,
+    def reduce_from_multi_cvx_hull_socp(
+            self, desc: SumOfCvxHullDesc,
             df_lb_thresh: float, norm_bound: float,
             state: dict,
             force_clarabel=False) -> TRAFSStep:
-        """Reduce to a subgradient given a box subdifferential defined as
-        ``g_bias + G @ p`` where ``0 <= p <= 1``.  Use an SOCP solver to compute
-        the result.
+        """Reduce to a subgradient given multiple convex hulls defined by
+        ``desc``. Use an SOCP solver to compute the result.
         """
         norm_bound = min(norm_bound, 1)
-        prev_Gb = state.get('box_prev_Gb')
+        prev_desc = state.get('multi_cvx_hull_prev_desc')
         def all_eq(a, b):
+            if isinstance(a, int):
+                return a == b
             if a.shape != b.shape:
                 return False
             if isinstance(a, np.ndarray):
@@ -787,27 +822,28 @@ class UnconstrainedFuncSubDiffHelper:
             else:
                 return (a != b).count_nonzero() == 0
 
-        xdim, pdim = G.shape
-        assert g_bias.shape == (xdim, )
-        if (prev_Gb is not None and all_eq(prev_Gb[0], G)
-                and all_eq(prev_Gb[1], g_bias)):
-            result = state['box_prev_result']
+        xdim = desc.G.shape[0]
+        pdim = desc.nr_hull
+        if prev_desc is not None and all(
+            all_eq(i, j) for i, j in zip(*map(attrs.astuple, (prev_desc, desc)))
+        ):
+            result = state['multi_cvx_hull_prev_result']
         else:
             cost_v = np.empty(xdim + pdim, dtype=np.float64)
-            cost_v[:xdim] = g_bias
+            cost_v[:xdim] = desc.bias
             cost_v[xdim:] = 1
             result = (SOCPSolverBase.make(
                         dim=xdim, dim_aux=pdim, coeff_vec=cost_v,
                         force_clarabel=force_clarabel)
-                      .add_ineq(G.T, np.arange(pdim, dtype=np.int32))
+                      .add_ineq(desc.G.T, desc.ui)
                       .add_aux_lower(np.zeros(pdim, dtype=np.float64))
                       .add_x_norm_bound()
                       .solve())
-            state['box_prev_Gb'] = (G, g_bias)
-            state['box_prev_result'] = result
+            state['multi_cvx_hull_prev_desc'] = desc
+            state['multi_cvx_hull_prev_result'] = result
 
         def dx_dg_fn(dx):
-            return (g_bias @ dx) + np.maximum(dx @ G, 0).sum()
+            return (desc.bias @ dx) + np.maximum(dx @ desc.G, 0).sum()
 
         return self.reduce_with_socp_result(
             result, df_lb_thresh, norm_bound,

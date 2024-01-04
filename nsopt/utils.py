@@ -10,7 +10,8 @@ def setup_pyx_import():
     """a context to import .pyx cython files"""
     # use a local cache in the directory of this repo to avoid conflicts with
     # multiple source versions on the system
-    build_dir = Path(__file__).resolve().parent.parent / 'build'
+    nsopt_dir = Path(__file__).resolve().parent
+    build_dir = nsopt_dir.parent / 'build'
     from pyximport import pyxbuild
     import pyximport
     assert pyxbuild.HAS_CYTHON
@@ -25,7 +26,10 @@ def setup_pyx_import():
         px = pyximport.install(
             build_dir=build_dir,
             setup_args={
-                'include_dirs': [np.get_include()],
+                'include_dirs': [
+                    nsopt_dir / 'prob',
+                    np.get_include()
+                ],
             },
             language_level=3,
         )
@@ -38,7 +42,7 @@ def default_make_ext_for_pyx(modname, pyxfilename):
     return Extension(
         name=modname,
         sources=[pyxfilename],
-        extra_compile_args=['-O3', '-march=native'],
+        extra_compile_args=['-O3', '-ggdb', '-march=native', '-Wall'],
         language='c++',
         define_macros=[("NPY_NO_DEPRECATED_API", "NPY_1_7_API_VERSION")],
     )

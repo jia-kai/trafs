@@ -11,7 +11,7 @@ import numpy.typing as npt
 import typing
 
 with setup_pyx_import():
-    from .distance_game_utils import distance_game_subd
+    from .kernels import distance_game_subd
 
 SIMPLEX_DIAMETER = np.sqrt(2) + 1e-4
 

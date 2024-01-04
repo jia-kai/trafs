@@ -8,7 +8,7 @@ import numpy.typing as npt
 import attrs
 
 with setup_pyx_import():
-    from .hmm_bench_utils import max_of_abs_subd
+    from .kernels import max_of_abs_subd
 
 class MaxOfAbs(UnconstrainedOptimizable, KnownLipschitzOptimizable):
     """Test problem taken from the paper Quasi-monotone Subgradient Methods for
