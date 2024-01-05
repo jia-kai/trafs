@@ -550,6 +550,9 @@ class UnconstrainedFuncSubDiffHelper:
     subdifferential for unconstrained problems. The problem is essentially
     finding the minimum norm subgradient."""
 
+    dx_l2_max: float = 1e5
+    """maximum L2 norm of the solved step"""
+
     df_g_norm_bound_thresh: float = 1e-4
     """maximum norm bound for the current lower bound of df to be considered as
     global"""
@@ -605,7 +608,7 @@ class UnconstrainedFuncSubDiffHelper:
 
         # although the problem is unconstrained, we assume we are optimizing
         # within the unit ball around current solution
-        dx = gc * (-min(norm_bound, 1) / np.maximum(gc_norm, 1e-9))
+        dx = gc * (-min(norm_bound, self.dx_l2_max) / np.maximum(gc_norm, 1e-9))
         if dx_dg_fn is None:
             dx_dg = float(np.dot(dx, gc))
         else:
@@ -626,7 +629,6 @@ class UnconstrainedFuncSubDiffHelper:
         convex hull are columns of ``G``. Use an SOCP solver to compute the
         result.
         """
-        norm_bound = min(norm_bound, 1)
         xdim = G.shape[0]
         prev_G = state.get('cvx_hull_prev_G')
         def all_eq(a, b):
@@ -661,6 +663,7 @@ class UnconstrainedFuncSubDiffHelper:
 
                 min_{x in B[1]} max_{g in G} d @ g
         """
+        norm_bound = min(norm_bound, self.dx_l2_max)
         xdim = result.x.size
         df_lb = result.dobj * self.f_lb_norm_bound_mul * np.sqrt(xdim)
         result = result * norm_bound
@@ -682,7 +685,7 @@ class UnconstrainedFuncSubDiffHelper:
                 raise RuntimeError(
                     f'socp result is incorrect: {cm}/{cn}') from exc
 
-        assert dx_dg >= result.dobj - 5e-7, (
+        assert result.dobj - dx_dg <= 1e-7 * max(1, abs(dx_dg)), (
             dx_dg, result.dobj, result.dobj - dx_dg)
 
         df_is_g = norm_bound <= self.df_g_norm_bound_thresh
@@ -792,7 +795,7 @@ class UnconstrainedFuncSubDiffHelper:
         assert info.primal_obj >= info.dual_obj * (1 - 1e-6) > 0, (
             info.primal_obj, info.dual_obj, info.primal_obj - info.dual_obj)
         dx = solver.result.x.copy()
-        dx *= min(norm_bound, 1) / np.linalg.norm(dx, ord=2)
+        dx *= min(norm_bound, self.dx_l2_max) / np.linalg.norm(dx, ord=2)
         dx_dg = (dx @ G).max()
         if dx_dg >= 0:
             return TRAFSStep.make_zero(xdim, False)
@@ -814,7 +817,6 @@ class UnconstrainedFuncSubDiffHelper:
         """Reduce to a subgradient given multiple convex hulls defined by
         ``desc``. Use an SOCP solver to compute the result.
         """
-        norm_bound = min(norm_bound, 1)
         prev_desc = state.get('multi_cvx_hull_prev_desc')
         def all_eq(a, b):
             if isinstance(a, int):

@@ -10,7 +10,7 @@ import typing
 import enum
 import copy
 
-@attrs.define(kw_only=True)
+@attrs.frozen(kw_only=True)
 class TRAFSSolver:
     """the Trust Region Adversarial Functional Subdifferential method"""
 
@@ -42,14 +42,14 @@ class TRAFSSolver:
     norm_incr_mul: float = 2
     """multiplier to be applied to norm bound when -dx @ dg is too small"""
 
+    subg_slack_init: float = 1.0
+    """functional subdifferential eps to use in the first iteration"""
+
     subg_slack_decay: float = .5
     """eps decay factor when -dx @ dg is not big enough"""
 
     subg_slack_incr: float = 1.5
     """eps increase factor when -dx @ dg is big enough"""
-
-    subg_slack_max: float = 1.0
-    """max eps in functional subdifferential"""
 
     subg_slack_tune_prob: float = .2
     """probability to automatically tune eps by computing another step using the
@@ -58,6 +58,10 @@ class TRAFSSolver:
     subg_slack_tune_thresh: float = 1.2
     """threshold of relative change of objective value decrease to accept the
     new eps in automatically eps tuning"""
+
+    subg_slack_tune_max_nr_try: int = 12
+    """max number of tries if subdiff does not change during tuning the
+    subdifferential eps"""
 
     subg_slack_est_winsize: int = 8
     """window size for the slack estimation"""
@@ -174,10 +178,13 @@ class TRAFSRuntime:
     obj_grad_state: dict = attrs.field(factory=dict)
 
     def __init__(self, solver: "TRAFSSolver", obj: Optimizable):
+        # copy the rng state to ensure multiple runs with the same RNG are
+        # reproducible
+        rng_seed = copy.deepcopy(solver.rng).bytes(16)
         self.__attrs_init__(
             obj=obj,
             solver=solver,
-            subg_slack=solver.eps_term / 2,
+            subg_slack=solver.subg_slack_init,
             min_subg_slack=min(max(solver.eps_term / 10, 1e-8),
                                solver.eps_term / 2),
             ls_steps_init=np.power(solver.ls_tau,
@@ -185,7 +192,11 @@ class TRAFSRuntime:
             ls_steps_grow=np.power(solver.ls_tau, solver.ls_batch_size),
             norm_hist=RotationBuffer(solver.norm_hist_winsize),
             subg_slack_est_hist=RotationBuffer(solver.subg_slack_est_winsize),
-            rng=copy.deepcopy(solver.rng)
+            rng=np.random.default_rng(
+                list(rng_seed) +
+                list(map(ord, obj.__class__.__name__)) +
+                [obj.x0.size]
+            )
         )
 
     def _randomize_subg_slack(self, reason: str):
@@ -282,16 +293,19 @@ class TRAFSRuntime:
 
         new_slack = subg_slack * k
         slack_mul = k
-        while (self.min_subg_slack <= new_slack and
-               new_slack <= solver.subg_slack_max):
+        nr_try = 0
+        while (new_slack >= self.min_subg_slack and
+               nr_try < solver.subg_slack_tune_max_nr_try):
             new_grad = get_grad(new_slack)
             if not np.all(new_grad.dx == grad.dx):
                 break
             slack_mul *= k
             new_slack *= k
+            nr_try += 1
         else:
             self.logmsg(f'auto eps tuning({tune_dir}):'
-                        f' grad does not change up to eps {new_slack:.3g}')
+                        ' grad does not change up to eps'
+                        f' {subg_slack:.3g}=>{new_slack:.3g} ({nr_try} tries)')
             return ls_result, grad
         if new_grad.dx_dg >= 0:
             if new_grad.df_lb_is_global:
@@ -317,17 +331,19 @@ class TRAFSRuntime:
             if solver.verbose:
                 msg += ' (accepted)'
             self.subg_slack = new_slack
-            self.subg_slack_est_mul = max(
-                solver.subg_slack_est_mul_min,
-                min(self.subg_slack_est_mul * slack_mul,
-                    solver.subg_slack_est_mul_max))
+            if self.iters > 1:
+                self.subg_slack_est_mul = max(
+                    solver.subg_slack_est_mul_min,
+                    min(self.subg_slack_est_mul * slack_mul,
+                        solver.subg_slack_est_mul_max))
+                self.subg_slack_tune_dir = tune_dir
             ls_result = new_ls
             grad = new_grad
-            self.subg_slack_tune_dir = tune_dir
         else:
             if solver.verbose:
                 msg += ' (rejected)'
-            self.subg_slack_tune_dir = 0
+            if self.iters > 1:
+                self.subg_slack_tune_dir = 0
 
         if solver.verbose:
             self.logmsg(msg)
@@ -404,9 +420,11 @@ class TRAFSRuntime:
 
         ls_result = self._batched_linesearch(grad, fval, xk)
 
-        if (self.iters >= 2 and ls_result.last_step < 1 and
-                self.rng.uniform() < solver.subg_slack_tune_prob):
-            subg_slack_tuned = True
+        # tune subg_slack at the first iter or by chance
+        if ((self.iters == 1 and solver.subg_slack_tune_prob > 0) or
+                (self.iters >= 2 and ls_result.last_step < 1 and
+                 self.rng.uniform() < solver.subg_slack_tune_prob)):
+            subg_slack_tuned = self.iters >= 2
             ls_result, grad = self._tune_subg_slack(
                 xk, fval, ls_result, grad, get_grad)
             subg_slack = self.subg_slack
@@ -449,7 +467,9 @@ class TRAFSRuntime:
         # adjust slack
         if not subg_slack_tuned:
             if self.iters == 1:
-                subg_slack = solver.subg_slack_max
+                # we used the initial default value at this iteration; a better
+                # estimation is now available from subg_slack_est_hist
+                subg_slack = np.inf
             elif grad.dx_dg <= -subg_slack * (solver.subg_slack_incr * 2 - 1):
                 # increase mul if it seems safe, i.e., delta >= 2 * next_slack;
                 # note that dx_dg is estimated as -(delta - this_slack)
@@ -464,7 +484,6 @@ class TRAFSRuntime:
                 self.min_subg_slack,
                 min(
                     subg_slack,
-                    solver.subg_slack_max,
                     self.subg_slack_est_hist.max() * self.subg_slack_est_mul))
 
         # if fval_lb is good enough we can use this bound

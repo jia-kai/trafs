@@ -55,7 +55,6 @@ class MaxQ(UnconstrainedOptimizable):
     def __init__(self, n: int):
         x0 = np.arange(1, n + 1, dtype=np.float64)
         x0[n // 2:] *= -1
-        x0 *= np.sqrt(n) / np.linalg.norm(x0, ord=2)
         self.x0 = x0
 
     def eval(self, x: npt.NDArray, *, need_grad=False):
@@ -161,7 +160,7 @@ class ChainedLQ(UnconstrainedOptimizable):
     @attrs.frozen
     class SubDiff(UnconstrainedOptimizable.SubDiff):
         _helper = UnconstrainedFuncSubDiffHelper(
-            socp_check_succ_rate=0.8,
+            socp_check_succ_rate=0.1,
         )
 
         x: npt.NDArray
@@ -231,7 +230,7 @@ class ChainedCB3I(UnconstrainedOptimizable):
     @attrs.frozen
     class SubDiff(UnconstrainedOptimizable.SubDiff):
         _helper = UnconstrainedFuncSubDiffHelper(
-            socp_check_succ_rate=0.3,
+            socp_check_succ_rate=0.1,
         )
 
         x: npt.NDArray
