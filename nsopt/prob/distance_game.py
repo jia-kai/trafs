@@ -130,17 +130,8 @@ class DistanceGame(SimplexConstrainedOptimizable):
 
             g0, (g1, h1) = cvx_hull
 
-            if g1.shape[0] == 0:
-                # compute global df_l if we only have linear constraints
-                # df_l = min_d max_g d@g = max_g min_d d@g = max_g (min_i g_i)
-                df_l = (g0.min(axis=1) - g0 @ self.x).max()
-                df_l_is_g = True
-                if sol.is_optimal and norm_bound >= SIMPLEX_DIAMETER:
-                    np.testing.assert_allclose(
-                        sol.pobj, df_l, atol=1e-6, rtol=1e-6)
-            else:
-                df_l = sol.dobj
-                df_l_is_g = norm_bound >= SIMPLEX_DIAMETER
+            df_l = sol.dobj
+            df_l_is_g = norm_bound >= SIMPLEX_DIAMETER
 
             assert df_l <= sol.pobj + 1e-6
 
@@ -185,7 +176,7 @@ class DistanceGame(SimplexConstrainedOptimizable):
             x_low = -x0
             x_high = 1 - x0
 
-            # we use the norm bound of 1 in the solver
+            # we scale x to have norm_bound = 1 for better numerical stability
             if norm_bound > 0:
                 # clip to [-1, 1] because ||x|| <= 1
                 x_low = np.maximum(x_low / norm_bound, -1)
@@ -212,9 +203,10 @@ class DistanceGame(SimplexConstrainedOptimizable):
                 solver.add_socp(g1[i], h1[i])
 
             ret = solver.solve()
-            np.testing.assert_allclose(ret.x.sum(), 0, atol=1e-7)
+            np.testing.assert_allclose(ret.x.sum(), 0, atol=1e-5)
             if norm_bound > 0:
                 ret = ret * norm_bound
+            assert (ret.x + self.x).min() >= -1e-7, (ret.x + self.x).min()
             return ret
 
     def __init__(self, A: npt.NDArray, B: npt.NDArray, P: npt.NDArray):

@@ -497,7 +497,7 @@ class MosekSOCPSolver(SOCPSolverBase):
             task.solutionsummary(mosek.streamtype.log)
             # task.writedata("/tmp/prob.ptf"); assert 0
         c = mosek.rescode
-        assert status in (c.ok, c.trm_stall, c.trm_stall), (
+        assert status in (c.ok, c.trm_stall), (
             f'bad optimizer status: {status}')
 
         xx = task.getxx(mosek.soltype.itr)
@@ -506,7 +506,7 @@ class MosekSOCPSolver(SOCPSolverBase):
         if self.coeff_vec is None:
             np.testing.assert_allclose(xx[-1], u)
         dual_obj = task.getdualobj(mosek.soltype.itr)
-        assert dual_obj <= u + 1.5e-6, (dual_obj, u, dual_obj - u)
+        assert dual_obj <= u + 1.5e-6, (dual_obj, u, dual_obj - u, status)
         dual_obj = min(dual_obj, u)
 
         if status == c.ok:
