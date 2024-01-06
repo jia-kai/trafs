@@ -134,6 +134,8 @@ def main():
                         help='random seed')
     parser.add_argument('--show-probs', action='store_true',
                         help='print the problem classes one per line and exit')
+    parser.add_argument('--update', action='store_true',
+                        help='reuse existing results in the output file')
     MethodFactory(None).setup_parser(parser, default_max_iters=50000)
     args = parser.parse_args()
     if args.show_probs:
@@ -143,9 +145,17 @@ def main():
 
     assert 0 <= args.idx < args.bench_size
 
+    if args.update:
+        with open(args.output, 'rb') as f:
+            results = pickle.load(f)
+            assert isinstance(results, dict)
+            print(f'Loaded results: {", ".join(results.keys())}')
+    else:
+        results = {}
+
     spec = ProbSpec(seed=args.seed, idx=args.idx, bench_size=args.bench_size)
     prob = makers[args.prob_name](spec)
-    results = MethodFactory(type(prob)).run_solvers(args, prob)
+    results.update(MethodFactory(type(prob)).run_solvers(args, prob))
     results['optimal'] = prob.get_optimal_value()
     with open(args.output, 'wb') as f:
         pickle.dump(results, f, protocol=pickle.HIGHEST_PROTOCOL)

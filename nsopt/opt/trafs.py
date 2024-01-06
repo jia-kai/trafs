@@ -392,14 +392,18 @@ class TRAFSRuntime:
 
         if grad.dx_dg == 0:
             # no progress can be made in this iteration
+
+            def decay_slack():
+                self.subg_slack *= solver.subg_slack_decay
+                self.subg_slack_est_mul = max(
+                    solver.subg_slack_est_mul_min,
+                    self.subg_slack_est_mul * solver.subg_slack_decay)
+
             if grad.df_lb_is_global:
                 # if this assertion fails, we should have found a solution,
                 # unless df_lb, df_lb_is_global, and dx_dg are inconsistent
                 assert subg_slack > self.min_subg_slack
-                self.subg_slack *= self.solver.subg_slack_decay
-                self.subg_slack_est_mul = max(
-                    self.solver.subg_slack_est_mul_min,
-                    self.subg_slack_est_mul * self.solver.subg_slack_decay)
+                decay_slack()
                 self.logmsg(f'eps decayed to {self.subg_slack:.3g}'
                             ' due to dx@dg = 0')
                 if not self.subg_slack_is_from_random:
@@ -413,7 +417,15 @@ class TRAFSRuntime:
                     assert self.failed_iters > 0
                     self.failed_iters -= 1
             else:
-                self._randomize_subg_slack('dx@dg = 0 without global guarantee')
+                if (self.subg_slack > self.min_subg_slack *
+                        solver.subg_slack_decay ** 5):
+                    decay_slack()
+                    self.logmsg(f'eps decayed to {self.subg_slack:.3g}'
+                                ' due to dx@dg = 0 without global guarantee but'
+                                ' large enough')
+                else:
+                    self._randomize_subg_slack(
+                        'dx@dg = 0 without global guarantee')
             return xk, IterStatus.succeeded
 
         ls_result = self._batched_linesearch(grad, fval, xk)

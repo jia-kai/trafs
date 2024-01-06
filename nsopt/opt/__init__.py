@@ -10,7 +10,7 @@ import argparse
 import typing
 
 if typing.TYPE_CHECKING:
-    from .shared import OptimizationResult
+    from .shared import Optimizable, OptimizationResult
 
 class MethodFactory:
     METHODS_ALL = {
@@ -69,9 +69,11 @@ class MethodFactory:
         parser.add_argument('--verbose', action='store_true',
                             help='whether to output optimizer internals')
 
-    def run_solvers(self, args, obj) -> dict[str, "OptimizationResult"]:
+    def run_solvers(self, args,
+                    obj: "Optimizable") -> dict[str, "OptimizationResult"]:
         """run all solvers; return a dict mapping method name to result"""
         results = {}
+        opt = obj.get_optimal_value()
         for k, (cls, mkarg) in self.methods.items():
             if k in args.supress or (args.only and k not in args.only):
                 continue
@@ -81,7 +83,10 @@ class MethodFactory:
             solver = cls(**mkarg(args))
             r = solver.solve(obj)
             results[k] = r
-            print(f'{k}: f={r.fval:.5g} iters={r.iters} time={r.time:.3f}s'
+            fmsg = f'f={r.fval:.5g}'
+            if opt is not None:
+                fmsg += f' gap={r.fval - opt:.5g}'
+            print(f'{k}: {fmsg} iters={r.iters} time={r.time:.3f}s'
                   f' optimal={r.optimal} ls={r.ls_tot_iters}',
                   flush=True)
         return results
