@@ -42,7 +42,7 @@ class TRAFSSolver:
     norm_incr_mul: float = 2
     """multiplier to be applied to norm bound when -dx @ dg is too small"""
 
-    subg_slack_init: float = 1.0
+    subg_slack_init: float = 0.1
     """functional subdifferential eps to use in the first iteration"""
 
     subg_slack_decay: float = .5
@@ -331,19 +331,17 @@ class TRAFSRuntime:
             if solver.verbose:
                 msg += ' (accepted)'
             self.subg_slack = new_slack
-            if self.iters > 1:
-                self.subg_slack_est_mul = max(
-                    solver.subg_slack_est_mul_min,
-                    min(self.subg_slack_est_mul * slack_mul,
-                        solver.subg_slack_est_mul_max))
-                self.subg_slack_tune_dir = tune_dir
+            self.subg_slack_est_mul = max(
+                solver.subg_slack_est_mul_min,
+                min(self.subg_slack_est_mul * slack_mul,
+                    solver.subg_slack_est_mul_max))
+            self.subg_slack_tune_dir = tune_dir
             ls_result = new_ls
             grad = new_grad
         else:
             if solver.verbose:
                 msg += ' (rejected)'
-            if self.iters > 1:
-                self.subg_slack_tune_dir = 0
+            self.subg_slack_tune_dir = 0
 
         if solver.verbose:
             self.logmsg(msg)
@@ -421,10 +419,9 @@ class TRAFSRuntime:
         ls_result = self._batched_linesearch(grad, fval, xk)
 
         # tune subg_slack at the first iter or by chance
-        if ((self.iters == 1 and solver.subg_slack_tune_prob > 0) or
-                (self.iters >= 2 and ls_result.last_step < 1 and
-                 self.rng.uniform() < solver.subg_slack_tune_prob)):
-            subg_slack_tuned = self.iters >= 2
+        if (self.iters >= 2 and ls_result.last_step < 1 and
+                self.rng.uniform() < solver.subg_slack_tune_prob):
+            subg_slack_tuned = True
             ls_result, grad = self._tune_subg_slack(
                 xk, fval, ls_result, grad, get_grad)
             subg_slack = self.subg_slack

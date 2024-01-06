@@ -497,7 +497,7 @@ class MosekSOCPSolver(SOCPSolverBase):
             task.solutionsummary(mosek.streamtype.log)
             # task.writedata("/tmp/prob.ptf"); assert 0
         c = mosek.rescode
-        assert status in (c.ok, c.trm_stall), (
+        assert status in (c.ok, c.trm_stall, c.trm_max_iterations), (
             f'bad optimizer status: {status}')
 
         xx = task.getxx(mosek.soltype.itr)
