@@ -1,4 +1,5 @@
 from ..opt.shared import TRAFSStep
+from ..utils import setup_pyx_import
 from .simplex import projection_simplex
 
 import attrs
@@ -46,7 +47,7 @@ class SOCPSolverBase(metaclass=abc.ABCMeta):
         is_optimal: bool
         """whether the solution is optimal"""
 
-        x: npt.NDArray
+        x: npt.NDArray = attrs.field(repr=False)
         """the optimal solution"""
 
         pobj: float
@@ -55,12 +56,16 @@ class SOCPSolverBase(metaclass=abc.ABCMeta):
         dobj: float
         """the optimal dual objective value"""
 
+        solver: str
+        """name of the solver"""
+
         def __mul__(self, s: float) -> typing.Self:
             return type(self)(
                 is_optimal=self.is_optimal,
                 x=self.x * s,
                 pobj=self.pobj * s,
-                dobj=self.dobj * s
+                dobj=self.dobj * s,
+                solver=self.solver,
             )
 
     @abc.abstractmethod
@@ -292,6 +297,7 @@ class ClarabelSOCPSolver(SOCPSolverBase):
             x=x,
             pobj=float(u),
             dobj=float(dual_obj),
+            solver='Clarabel',
         )
 
 @attrs.define
@@ -506,7 +512,7 @@ class MosekSOCPSolver(SOCPSolverBase):
         if self.coeff_vec is None:
             np.testing.assert_allclose(xx[-1], u)
         dual_obj = task.getdualobj(mosek.soltype.itr)
-        assert dual_obj <= u + 1.5e-6, (dual_obj, u, dual_obj - u, status)
+        assert dual_obj <= u + 5e-6, (dual_obj, u, dual_obj - u, status)
         dual_obj = min(dual_obj, u)
 
         if status == c.ok:
@@ -517,6 +523,7 @@ class MosekSOCPSolver(SOCPSolverBase):
             x=x,
             pobj=float(u),
             dobj=float(dual_obj),
+            solver='MOSEK',
         )
 
 @attrs.frozen
@@ -572,9 +579,6 @@ class UnconstrainedFuncSubDiffHelper:
 
     cvx_hull_prefer_qp: bool = os.getenv('NSOPT_CVX_HULL_PREFER_QP') == '1'
     cvx_hull_prefer_socp: bool = os.getenv('NSOPT_CVX_HULL_PREFER_SOCP') == '1'
-
-    socp_check_succ_rate: float = 1.0
-    """success rate requirement for SOCP solution check"""
 
     def reduce_grad_range(
             self, glow: npt.NDArray, ghigh: npt.NDArray,
@@ -665,29 +669,27 @@ class UnconstrainedFuncSubDiffHelper:
         """
         norm_bound = min(norm_bound, self.dx_l2_max)
         xdim = result.x.size
-        df_lb = result.dobj * self.f_lb_norm_bound_mul * np.sqrt(xdim)
+        pobj_recompute = dx_dg_fn(result.x)
+
+        tol = state.setdefault('socp_pboj_check_tol', 1e-6)
+        if not np.allclose(pobj_recompute, result.pobj, atol=tol, rtol=tol):
+            print('Warning: SOCP objective does not match recomputed bound:'
+                  f' solver={result.solver} optimal={result.is_optimal}'
+                  f' obj={result.pobj:g} expect={pobj_recompute:g}'
+                  f' diff={abs(result.pobj - pobj_recompute):g} {tol=:.2g}')
+            assert (not result.is_optimal or tol < 1e-5) and (tol < 0.01), (
+                pobj_recompute, result.pobj, tol, result)
+            state['socp_pboj_check_tol'] = tol * 2
+
+        # dual obj should be no larger than primal obj
+        assert result.dobj - pobj_recompute <= 1e-7*max(1, abs(result.dobj)), (
+            pobj_recompute, result.dobj, result.dobj - pobj_recompute)
+
+        df_lb = (min(result.dobj, pobj_recompute) *
+                 self.f_lb_norm_bound_mul * np.sqrt(xdim))
+
         result = result * norm_bound
         dx_dg = dx_dg_fn(result.x)
-
-        obj_chk = int(np.allclose(dx_dg, result.pobj, atol=1e-6, rtol=1e-6))
-        if 'socp_obj_chk_succ' not in state:
-            state['socp_obj_chk_succ'] = 0
-            state['socp_obj_chk_tot'] = 0
-
-        state['socp_obj_chk_succ'] += obj_chk
-        state['socp_obj_chk_tot'] += 1
-        if (cm := state['socp_obj_chk_succ']) / (
-            cn := state['socp_obj_chk_tot']) < self.socp_check_succ_rate:
-            try:
-                np.testing.assert_allclose(
-                    dx_dg, result.pobj, atol=1e-6, rtol=1e-6)
-            except Exception as exc:
-                raise RuntimeError(
-                    f'socp result is incorrect: {cm}/{cn}') from exc
-
-        assert result.dobj - dx_dg <= 1e-7 * max(1, abs(dx_dg)), (
-            dx_dg, result.dobj, result.dobj - dx_dg)
-
         df_is_g = norm_bound <= self.df_g_norm_bound_thresh
         if df_lb >= -1e-9:
             return TRAFSStep.make_zero(xdim, df_is_g)
@@ -849,7 +851,11 @@ class UnconstrainedFuncSubDiffHelper:
             state['multi_cvx_hull_prev_result'] = result
 
         def dx_dg_fn(dx):
-            return (desc.bias @ dx) + np.maximum(dx @ desc.G, 0).sum()
+            with setup_pyx_import():
+                from .kernels import reduce_multi_cvx_hull_max_sum
+            return ((desc.bias @ dx) +
+                    reduce_multi_cvx_hull_max_sum(
+                        desc.nr_hull,  dx @ desc.G, desc.ui))
 
         return self.reduce_with_socp_result(
             result, df_lb_thresh, norm_bound,

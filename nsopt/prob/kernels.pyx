@@ -357,3 +357,19 @@ def distance_game_subd(
                 g0p += 1
 
     return g0[:g0p], (g1[:g1p], h1[:g1p])
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def reduce_multi_cvx_hull_max_sum(
+        int nr_hull,
+        np.ndarray[f64_t, ndim=1] vtx_values,
+        np.ndarray[i32_t, ndim=1] hull_ids) -> float:
+    assert vtx_values.shape[0] == hull_ids.shape[0]
+    cdef np.ndarray[f64_t, ndim=1] maxv = np.zeros(nr_hull, dtype=np.float64)
+    cdef int i, hid
+    for i in range(vtx_values.shape[0]):
+        hid = hull_ids[i]
+        assert 0 <= hid < nr_hull
+        maxv[hid] = max(maxv[hid], vtx_values[i])
+    return maxv.sum()
