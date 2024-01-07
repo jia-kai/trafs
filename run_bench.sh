@@ -1,7 +1,5 @@
 #!/bin/bash -e
 
-set -u -e
-
 cd $(dirname $0)
 PROBS=$(./run_bench.py --show-probs -o0 -pDG -i0 -s0 |
     awk '/Problem classes/ {flag=1; next} flag')
@@ -19,6 +17,15 @@ echo "Running $nr_par parallel tasks on $nr_cpu CPUs"
 
 mkdir -p $OUTDIR
 
+if [ "$1" = "--update" ]; then
+    exist_check=''
+    opts='--only trafs --update'
+    shift
+else
+    exist_check="[ -f $OUTDIR/{1}.{2}.pkl ] && exit 0;"
+    opts=''
+fi
+
 parallel -j $nr_par --colsep '-' --lb --eta --progress "$@" \
     --argfile=<(
 for j in $(seq 0 $(( $BENCH_SIZE-1 )) | tac); do
@@ -26,10 +33,10 @@ for j in $(seq 0 $(( $BENCH_SIZE-1 )) | tac); do
         printf '%s-%02d\n' $i $j
     done
 done) bash -c "\" \
-[ -f $OUTDIR/{1}.{2}.pkl ] && exit 0; \
+$exist_check \
 stdbuf -i0 -o0 -e0 \
     taskset --cpu-list \
     \$(( ({%}-1)*$CPU_PER_TASK ))-\$(( ({%}-1)*$CPU_PER_TASK+$CPU_USE_PER_TASK-1 )) \
     ./run_bench.py -o $OUTDIR/{1}.{2}.pkl -s $BENCH_SIZE \
-        -p {1} -i {2} 2>&1 | tee $OUTDIR/{1}.{2}.log \
+        $opts -p {1} -i {2} 2>&1 | tee $OUTDIR/{1}.{2}.log \
 \""

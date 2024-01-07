@@ -71,7 +71,7 @@ class Number:
     def bold_extreme(cls, nums: typing.Iterable['Number'], r=min):
         v = r(*nums)
         for i in nums:
-            if i.val == v.val:
+            if repr(i) == repr(v):
                 i.bold = True
 
 
@@ -428,11 +428,14 @@ def main():
                         help='directory to load benchmark results')
     parser.add_argument('-o', '--output', required=True,
                         help='output latex file')
+    parser.add_argument('--print', action='store_true',
+                        help='print the table to stdout')
     args = parser.parse_args()
 
     summarizer = BenchmarkSummarizer(Path(args.bench_dir))
     df = summarizer.make_bench_table()
-    print(df)
+    if args.print:
+        print(df)
 
     latex = df.style.to_latex(
         hrules=True, clines='skip-last;data',

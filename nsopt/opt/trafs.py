@@ -131,6 +131,10 @@ class IterStatus(enum.Enum):
     succeeded = 'succeeded'
     """current iteration succeeded, move on to next iteration"""
 
+    retry = 'retry'
+    """retry current iteration (do not record iter number and history); used
+    internally by :class:`TRAFSRuntime`"""
+
     optimal = 'optimal'
     """optimal solution found"""
 
@@ -203,9 +207,10 @@ class TRAFSRuntime:
         """try a random functional subdifferential slack after failure to find a
         descent direction"""
         self.subg_slack_is_from_random = True
-        k = np.log(100)
+        kmin = max(np.log(self.min_subg_slack / self.subg_slack), -np.log(100))
+        kmax = np.log(1000)
         self.subg_slack = max(
-            np.exp(self.rng.uniform(-k, k)) * self.last_subg_slack,
+            np.exp(self.rng.uniform(kmin, kmax)) * self.last_subg_slack,
             self.min_subg_slack)
         self.logmsg(
             f'failed to find descent direction due to {reason};'
@@ -264,11 +269,15 @@ class TRAFSRuntime:
 
         xk = obj.proj(xk)
         fval, sub_diff = obj.eval(xk, need_grad=True)
-        self.fval_hist.append(fval)
-        try:
-            return self._do_next_iter(xk, fval, sub_diff)
-        finally:
+        xk, status = self._do_next_iter(xk, fval, sub_diff)
+
+        if status == IterStatus.retry:
+            self.iters -= 1
+            status = IterStatus.succeeded
+        else:
+            self.fval_hist.append(fval)
             self.iter_times.append(self.timer.elapsed())
+        return xk, status
 
     def _tune_subg_slack(
             self,
@@ -390,7 +399,7 @@ class TRAFSRuntime:
                         f' ||x||={np.linalg.norm(xk, ord=2):.3g})')
             return xk, IterStatus.optimal
 
-        if grad.dx_dg == 0:
+        if grad.dx_dg >= 0:
             # no progress can be made in this iteration
 
             def decay_slack():
@@ -400,9 +409,11 @@ class TRAFSRuntime:
                     self.subg_slack_est_mul * solver.subg_slack_decay)
 
             if grad.df_lb_is_global:
-                # if this assertion fails, we should have found a solution,
-                # unless df_lb, df_lb_is_global, and dx_dg are inconsistent
-                assert subg_slack > self.min_subg_slack
+                if subg_slack * solver.subg_slack_decay <= self.min_subg_slack:
+                    self._randomize_subg_slack(
+                        'dx@dg = 0 with global guarantee, but eps is too small')
+                    return xk, IterStatus.retry
+
                 decay_slack()
                 self.logmsg(f'eps decayed to {self.subg_slack:.3g}'
                             ' due to dx@dg = 0')
@@ -417,16 +428,22 @@ class TRAFSRuntime:
                     assert self.failed_iters > 0
                     self.failed_iters -= 1
             else:
-                if (self.subg_slack > self.min_subg_slack *
-                        solver.subg_slack_decay ** 5):
+                if (self.subg_slack * solver.subg_slack_decay ** 5 >
+                        self.min_subg_slack):
+                    # when current slack is large, it is likely that
+                    # df_lb_is_global being false is due to the solver is unable
+                    # to prove global lower bound
                     decay_slack()
                     self.logmsg(f'eps decayed to {self.subg_slack:.3g}'
                                 ' due to dx@dg = 0 without global guarantee but'
                                 ' large enough')
+                    # similar to above, only count random slack as failed
+                    assert self.failed_iters > 0
+                    self.failed_iters -= 1
                 else:
                     self._randomize_subg_slack(
                         'dx@dg = 0 without global guarantee')
-            return xk, IterStatus.succeeded
+            return xk, IterStatus.retry
 
         ls_result = self._batched_linesearch(grad, fval, xk)
 
@@ -450,7 +467,7 @@ class TRAFSRuntime:
             # still accept the solution if it makes progress)
             self._randomize_subg_slack(
                 f'no progress after line search (dx@dg={grad.dx_dg:.3g})')
-            return xk, IterStatus.succeeded
+            return xk, IterStatus.retry
 
         # now we know that current iteration makes descent progress
 

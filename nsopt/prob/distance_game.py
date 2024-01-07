@@ -160,9 +160,6 @@ class DistanceGame(SimplexConstrainedOptimizable):
             if sol.is_optimal:
                 np.testing.assert_allclose(dx_dg, sol.pobj, atol=1e-6, rtol=1e-6)
 
-            if dx_dg >= 0:
-                return TRAFSStep.make_zero(self.x.shape[0], False)
-
             return TRAFSStep(dx, dx_dg, df_l, df_l_is_g)
 
         def _solve_trafs(self, cvx_hull, norm_bound: float):

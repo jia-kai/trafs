@@ -564,9 +564,6 @@ class UnconstrainedFuncSubDiffHelper:
     """maximum norm bound for the current lower bound of df to be considered as
     global"""
 
-    gc_norm_zthresh: float = 1e-7
-    """consider the gradient as zero if its norm is smaller than this value"""
-
     f_lb_norm_bound_mul: float = 1
     """L2 norm bound multiplier (multiplied with sqrt(n)) to compute the lower
     bound of the objective delta"""
@@ -576,6 +573,10 @@ class UnconstrainedFuncSubDiffHelper:
 
     qp_iters: int = 200
     """max number of iterations for the QP solver"""
+
+    qp_min_pobj: float = 1e-13
+    """abort the QP solver if the primal objective (i.e., min grad norm) is
+    below this value"""
 
     cvx_hull_prefer_qp: bool = os.getenv('NSOPT_CVX_HULL_PREFER_QP') == '1'
     cvx_hull_prefer_socp: bool = os.getenv('NSOPT_CVX_HULL_PREFER_SOCP') == '1'
@@ -607,8 +608,11 @@ class UnconstrainedFuncSubDiffHelper:
         :param dx_dg_fn: a function that computes dx_dg given dx
         """
         gc_norm = np.linalg.norm(gc, ord=2)
-        if gc_norm <= self.gc_norm_zthresh:
-            return TRAFSStep.make_zero(gc.size, True)
+
+        # min_d max_g d@g = max_g -|g| = -min_g |g| >= -gc_norm even if gc is
+        # not the global minimum, so we have a sound estimation of df_l
+        df_l = -gc_norm * self.f_lb_norm_bound_mul * np.sqrt(gc.size)
+        df_is_g = norm_bound <= self.df_g_norm_bound_thresh
 
         # although the problem is unconstrained, we assume we are optimizing
         # within the unit ball around current solution
@@ -617,12 +621,7 @@ class UnconstrainedFuncSubDiffHelper:
             dx_dg = float(np.dot(dx, gc))
         else:
             dx_dg = float(dx_dg_fn(dx))
-        if dx_dg >= 0:
-            return TRAFSStep.make_zero(gc.size, False)
-        # min_d max_g d@g = max_g -|g| = -min_g |g| >= -gc_norm even if gc is
-        # not the global minimum
-        df_l = -gc_norm * self.f_lb_norm_bound_mul * np.sqrt(gc.size)
-        df_is_g = norm_bound <= self.df_g_norm_bound_thresh
+
         return TRAFSStep(dx, dx_dg, df_l, df_is_g)
 
     def reduce_from_cvx_hull_socp(
@@ -691,11 +690,6 @@ class UnconstrainedFuncSubDiffHelper:
         result = result * norm_bound
         dx_dg = dx_dg_fn(result.x)
         df_is_g = norm_bound <= self.df_g_norm_bound_thresh
-        if df_lb >= -1e-9:
-            return TRAFSStep.make_zero(xdim, df_is_g)
-
-        if dx_dg >= 0:
-            return TRAFSStep.make_zero(xdim, df_is_g and result.is_optimal)
 
         return TRAFSStep(
             dx=result.x,
@@ -759,7 +753,7 @@ class UnconstrainedFuncSubDiffHelper:
             i = result.info
             if i.primal_inf > 1e-8:
                 return False
-            return (i.primal_obj < self.gc_norm_zthresh**2 or
+            return (i.primal_obj < self.qp_min_pobj or
                     GtG.dot(result.x).min() > 0)
         solver.settings.custom_term_cb = term_cb
         solver.settings.eps_abs = self.qp_eps
@@ -799,12 +793,11 @@ class UnconstrainedFuncSubDiffHelper:
         dx = solver.result.x.copy()
         dx *= min(norm_bound, self.dx_l2_max) / np.linalg.norm(dx, ord=2)
         dx_dg = (dx @ G).max()
-        if dx_dg >= 0:
-            return TRAFSStep.make_zero(xdim, False)
 
         df_lb = (-1 / np.sqrt(2 * info.dual_obj) * self.f_lb_norm_bound_mul *
                  np.sqrt(xdim))
         df_is_g = norm_bound <= self.df_g_norm_bound_thresh
+
         return TRAFSStep(
             dx=dx,
             dx_dg=dx_dg,
