@@ -22,6 +22,7 @@ class Number:
     val: typing.Optional[float]
     bold: bool = False
     percent: bool = False
+    prefer_sci: bool = False
 
     def __lt__(self, other):
         assert isinstance(other, Number), other
@@ -45,15 +46,15 @@ class Number:
         if self.percent:
             r = rf'{self.val*100:.0f}\%'
         else:
-            r = self.fmt(self.val)
+            r = self.fmt(self.val, self.prefer_sci)
         if self.bold:
             r = r'\textbf{' + r + '}'
         return r
 
     @classmethod
-    def fmt(cls, num: float) -> str:
+    def fmt(cls, num: float, prefer_sci: bool = False) -> str:
         """format a real number to latex string"""
-        if abs(num) < 5e-3:
+        if abs(num) < 5e-3 or (prefer_sci and abs(num) > 1e3):
             if abs(num) == 0:
                 return '0'
             s = f'{num:.1e}'
@@ -68,10 +69,10 @@ class Number:
         return f'{num:.2f}'
 
     @classmethod
-    def bold_extreme(cls, nums: typing.Iterable['Number'], r=min):
-        v = r(*nums)
+    def bold_extreme(cls, nums: typing.Iterable['Number'], reduction=min):
+        rv = repr(reduction(*nums))
         for i in nums:
-            if repr(i) == repr(v):
+            if repr(i) == rv:
                 i.bold = True
 
 
@@ -188,6 +189,8 @@ class BenchmarkSummarizer:
                     meth_gap, shift=1e-6))
 
             Number.bold_extreme(sub_table[:, -1])
+            for i in sub_table[:, -1]:
+                i.prefer_sci = True
 
             table.append(sub_table)
 
@@ -256,7 +259,7 @@ class BenchmarkSummarizer:
 
         for i in range(3):
             Number.bold_extreme(sub_table[:, eps_i*3+i],
-                                r=max if i == 2 else min)
+                                reduction=max if i == 2 else min)
 
     def _gmean(self, val, *, shift: float=0) -> float:
         return gmean(val + shift) - shift

@@ -100,7 +100,7 @@ void compute_sum_of_max_subd_mask(T tot_slack, uint8_t* mask, const T* comp,
         mask[top.sum_id] |= 1 << top.comp_id;
 
         auto& st = comp_sorted[top.sum_id];
-        if (st.head + 1 < NMAX - 1) {
+        if (st.head < NMAX - 2) {
             slack.emplace(st.data[st.head].t - st.data[st.head + 1].t,
                           top.sum_id, st.data[st.head + 1].i);
             ++st.head;

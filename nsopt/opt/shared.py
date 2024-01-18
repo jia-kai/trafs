@@ -94,10 +94,6 @@ class Optimizable(metaclass=ABCMeta):
     x0: npt.NDArray
     """initial point"""
 
-    trafs_norm_min: float = 0
-    """minimum step norm constraint in TRAFS; set to a larger value to avoid
-    numerical issues """
-
     pgd_default_lr: float = 1.0
     """default learning rate for projected gradient descent"""
 
