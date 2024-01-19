@@ -1,6 +1,7 @@
 from ..opt.shared import (
     ProximalGradOptimizable, KnownLipschitzOptimizable, LipschitzConstants)
 from .utils import make_stable_rng, UnconstrainedFuncSubDiffHelper
+from ..utils import setup_pyx_import
 
 import attr
 import numpy as np
@@ -9,12 +10,8 @@ import scipy.special as sps
 
 import typing
 
-# inplace functions
-def mul_(x, y):
-    return np.multiply(x, y, out=x)
-
-def add_(x, y):
-    return np.add(x, y, out=x)
+with setup_pyx_import():
+    from .kernels import l1_reg_subd
 
 class L1RegularizedOptimizable(ProximalGradOptimizable):
     """min f(x) + lam ||x||_1 where f is smooth"""
@@ -37,32 +34,13 @@ class L1RegularizedOptimizable(ProximalGradOptimizable):
         lam: float
         """the regularization parameter"""
 
-        def _get_subgrad(self, slack):
-            st_idx = np.argsort(self.pen)
-            st_val = self.pen[st_idx]
-            cum = np.cumsum(st_val)
-
-            # cum[i] > slack / 2 >= cum[i - 1]
-            i = np.searchsorted(cum, slack / 2, side='right')
-
-            # mask of selected nonsmooth coordinates
-            mask = np.zeros_like(self.pen, dtype=bool)
-            mask[st_idx[:i]] = True
-            lam = self.lam
-            sel = np.where(mask,
-                           np.array(lam, dtype=self.pen.dtype),
-                           np.array(0, dtype=self.pen.dtype))
-            g = add_(mul_(np.sign(self.x0), (lam - sel)), self.g0)
-            return g - sel, g + sel
-
         def reduce_trafs(
                 self,
                 subg_slack: float, df_lb_thresh: float, norm_bound: float,
                 state: dict):
-            assert norm_bound > 0
-            glow, ghigh = self._get_subgrad(subg_slack)
-            return self._helper.reduce_grad_range(glow, ghigh, df_lb_thresh,
-                                                  norm_bound)
+            gc = l1_reg_subd(subg_slack, self.lam, self.g0, self.x0, self.pen)
+            return self._helper.reduce_with_min_grad(
+                gc, df_lb_thresh, norm_bound)
 
         def take_arbitrary(self):
             return self.g0 + np.sign(self.x0) * self.lam

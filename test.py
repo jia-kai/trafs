@@ -9,7 +9,7 @@ from nsopt.prob import (LassoRegression, LassoClassification, MaxOfAbs,
                         MaxQ, MXHILB, ChainedLQ, ChainedCB3I, ChainedCB3II,
                         DistanceGame)
 with setup_pyx_import():
-    from nsopt.prob.kernels import sum_of_max_subd_mask
+    from nsopt.prob.kernels import sum_of_max_subd_mask, l1_reg_subd
 
 import unittest
 import itertools
@@ -136,12 +136,18 @@ class TestL1SubDiff(TestCaseWithRng):
         g_low[idx] = g0[idx] - lam
         g_high[idx] = g0[idx] + lam
 
-        g_low_get, g_high_get = LassoRegression.SubDiff(
-            x0, g0, pen, lam)._get_subgrad(self.slack)
-        np.testing.assert_allclose(g_low, g_low_get)
-        np.testing.assert_allclose(g_high, g_high_get)
+        gc_expect = np.zeros_like(g0)
+        for i in range(n):
+            if g_low[i] > 0:
+                gc_expect[i] = g_low[i]
+            elif g_high[i] < 0:
+                gc_expect[i] = g_high[i]
 
-    def test_meth(self):
+        gc_get = l1_reg_subd(
+            self.slack, self.lam, g0, x0, pen)
+        np.testing.assert_allclose(gc_expect, gc_get)
+
+    def test_l1_reg_subd(self):
         n = self.n
         slack = self.slack
         thresh = slack / (2 * np.sqrt(n)) + 1e-4

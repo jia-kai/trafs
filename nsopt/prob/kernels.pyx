@@ -91,12 +91,47 @@ def sum_of_max_subd_mask(
         raise NotImplementedError(f'unsupported comp num: {comp.shape[1]}')
     return mask
 
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def l1_reg_subd(
+        f64_t slack, f64_t lam,
+        np.ndarray[f64_t, ndim=1] g0,
+        np.ndarray[f64_t, ndim=1] x,
+        np.ndarray[f64_t, ndim=1] pen) -> np.ndarray:
+    """functional subdifferential of the l1 regularization function
+
+    :param g0: gradient of the smooth part
+    :param x: original x values
+    :param pen: lam * abs(x)
+    :return: min norm gradient
+    """
+    cdef int n = g0.shape[0], si, i
+    cdef np.ndarray[long, ndim=1] st_idx = np.argsort(pen)
+    cdef np.ndarray[f64_t, ndim=1] ret = g0.copy()
+    cdef f64_t glow, ghigh
+
+    assert n == x.shape[0] == pen.shape[0]
+
+    slack /= 2
+    for si in range(n):
+        i = st_idx[si]
+        slack -= pen[i]
+
+        if slack < 0:
+            ret[i] += lam * sign(x[i])
+        else:
+            glow = ret[i] - lam
+            ghigh = ret[i] + lam
+            ret[i] = max(glow, 0) + min(ghigh, 0)
+
+    return ret
+
 
 @cython.boundscheck(False)
 @cython.wraparound(False)
 def max_of_abs_subd(
-    f64_t slack, f64_t fval,
-    f64_t x0, np.ndarray[f64_t, ndim=1] abs1, np.ndarray[f64_t, ndim=1] abs1_inp,
+        f64_t slack, f64_t fval, f64_t x0,
+        np.ndarray[f64_t, ndim=1] abs1, np.ndarray[f64_t, ndim=1] abs1_inp,
 ) -> typing.Optional[csc_matrix]:
     """compute the vertices for the subdifferential convex hull of the max of
         abs function

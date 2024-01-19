@@ -581,21 +581,6 @@ class UnconstrainedFuncSubDiffHelper:
     cvx_hull_prefer_qp: bool = os.getenv('NSOPT_CVX_HULL_PREFER_QP') == '1'
     cvx_hull_prefer_socp: bool = os.getenv('NSOPT_CVX_HULL_PREFER_SOCP') == '1'
 
-    def reduce_grad_range(
-            self, glow: npt.NDArray, ghigh: npt.NDArray,
-            df_lb_thresh: float, norm_bound: float) -> TRAFSStep:
-        """Reduce to a subgradient from the subdifferential defined by
-        ``{ g | glow <= g <= ghigh }``.
-
-        Note that the inputs ``glow`` and ``ghigh`` are modified in-place.
-        """
-
-        # compute gc within [glow, ghigh] that is closest to 0
-        glow = np.maximum(glow, 0, out=glow)
-        ghigh = np.minimum(ghigh, 0, out=ghigh)
-        gc = np.add(glow, ghigh, out=ghigh)
-        return self.reduce_with_min_grad(gc, df_lb_thresh, norm_bound)
-
     def reduce_with_min_grad(
             self, gc: npt.NDArray,
             df_lb_thresh: float, norm_bound: float, *,
