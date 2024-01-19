@@ -342,6 +342,11 @@ class MosekSOCPSolver(SOCPSolverBase):
 
         ip = mosek.iparam
         task.putintparam(ip.num_threads, 1)
+        # mosek uses a simplex solver for LP, which is too slow in certain
+        # cases (e.g., ./run_bench.py -o /dev/null -p DG -i 15 -s 50
+        #   --only trafs --verbose)
+        # So we enforce the conic solver in all cases
+        task.putintparam(ip.optimizer, mosek.optimizertype.conic)
 
         if self.verbose:
             for i in range(self.dim):
@@ -498,10 +503,14 @@ class MosekSOCPSolver(SOCPSolverBase):
     def solve(self) -> SOCPSolverBase.Result:
         self._setup_var_bound()
         task = self._task
+
+        if self.verbose:
+            print('---------------- begin MOSEK optimizer ----------------')
+            # task.writedata("/tmp/prob.ptf"); assert 0
         status = task.optimize()
         if self.verbose:
             task.solutionsummary(mosek.streamtype.log)
-            # task.writedata("/tmp/prob.ptf"); assert 0
+            print('+++++++++++++++++ end MOSEK optimizer +++++++++++++++++')
         c = mosek.rescode
         assert status in (c.ok, c.trm_stall, c.trm_max_iterations), (
             f'bad optimizer status: {status}')
