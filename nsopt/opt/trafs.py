@@ -55,6 +55,9 @@ class TRAFSSolver:
     """probability to automatically tune eps by computing another step using the
     same xk"""
 
+    subg_slack_tune_prob_high: float = .8
+    """probability to tune eps when previous tuning succeeded"""
+
     subg_slack_tune_max_nr_try: int = 12
     """max number of tries if subdiff does not change during tuning the
     subdifferential eps"""
@@ -157,7 +160,13 @@ class TRAFSRuntime:
     norm_hist: RotationBuffer
     subg_slack_est_hist: RotationBuffer
 
+    subg_slack_tune_prob: float
+
     rng: np.random.Generator
+
+    subg_slack_tune_cnt: int = 0
+    """number of times eps is tuned; used to control overhead of random
+    tuning"""
 
     subg_slack_est_mul: float = 1.0
     last_subg_slack: float = 1.0
@@ -167,6 +176,8 @@ class TRAFSRuntime:
     """direction of eps tuning: -1 for decrease, 1 for increase, 0 for random"""
 
     subg_slack_is_from_random: bool = False
+    """when progress is stalled, this flag is True if slack randomization is
+    ever used"""
 
     fval_lb: float = -np.inf
     timer: CPUTimer = attrs.field(factory=CPUTimer)
@@ -185,13 +196,13 @@ class TRAFSRuntime:
             obj=obj,
             solver=solver,
             subg_slack=solver.subg_slack_init,
-            min_subg_slack=min(max(solver.eps_term / 10, 1e-8),
-                               solver.eps_term / 2),
+            min_subg_slack=min(solver.eps_term / 10, 1e-10),
             ls_steps_init=np.power(solver.ls_tau,
                                    np.arange(solver.ls_batch_size)),
             ls_steps_grow=np.power(solver.ls_tau, solver.ls_batch_size),
             norm_hist=RotationBuffer(solver.norm_hist_winsize),
             subg_slack_est_hist=RotationBuffer(solver.subg_slack_est_winsize),
+            subg_slack_tune_prob=solver.subg_slack_tune_prob,
             rng=np.random.default_rng(
                 list(rng_seed) +
                 list(map(ord, obj.__class__.__name__)) +
@@ -210,7 +221,7 @@ class TRAFSRuntime:
             self.min_subg_slack)
         self.logmsg(
             f'failed to find descent direction due to {reason};'
-            f' try eps {self.subg_slack:.3g}')
+            f' randomize eps {self.subg_slack:.3g}')
 
     def _batched_linesearch(self, grad: TRAFSStep, fval, xk) -> LineSearchResult:
         all_dx_new = []
@@ -284,6 +295,7 @@ class TRAFSRuntime:
         """try tuning the eps
         :return: whether better eps is found, new line search result, new grad
         """
+        self.subg_slack_tune_cnt += 1
         subg_slack = self.subg_slack
         solver = self.solver
         tune_dir = self.subg_slack_tune_dir
@@ -448,36 +460,48 @@ class TRAFSRuntime:
         ls_result = self._batched_linesearch(grad, fval, xk)
 
         subg_slack_tuned = False
-        if self.iters >= 2:
-            def run_tune():
-                nonlocal subg_slack_tuned, ls_result, grad
-                subg_slack_tuned, ls_result, grad = self._tune_subg_slack(
-                    xk, fval, ls_result, grad, get_grad)
+        def run_slack_tune(force_dir=None) -> bool:
+            nonlocal subg_slack_tuned, subg_slack, ls_result, grad
+            if force_dir is not None:
+                self.subg_slack_tune_dir = force_dir
+            subg_slack_tuned, ls_result, grad = self._tune_subg_slack(
+                xk, fval, ls_result, grad, get_grad)
+            subg_slack = self.subg_slack
+            if subg_slack_tuned:
+                self.subg_slack_tune_prob = solver.subg_slack_tune_prob_high
+            else:
+                self.subg_slack_tune_prob = solver.subg_slack_tune_prob
+            return subg_slack_tuned
 
+        if all(i.min() >= fval for i in ls_result.fvals_new):
+            # no progress after line search; try tuning eps
+            if subg_slack > self.min_subg_slack:
+                run_slack_tune(force_dir=-1)
+            if not subg_slack_tuned:
+                run_slack_tune(force_dir=1)
+            if not subg_slack_tuned or all(
+                    i.min() >= fval for i in ls_result.fvals_new):
+                # randomization as a last resort
+                self._randomize_subg_slack(
+                    f'no progress after line search (dx@dg={grad.dx_dg:.3g})')
+                return xk, IterStatus.retry
+        elif self.iters >= 2:
             if grad.dx_dg <= -subg_slack * (solver.subg_slack_incr * 2 - 1):
                 # dx_dg seems large enough, try increasing eps
-                self.subg_slack_tune_dir = 1
                 self.logmsg(f'try increasing eps since dx@dg = {grad.dx_dg:.3g}'
                             ' is large enough')
-                run_tune()
-            elif self.rng.uniform() < solver.subg_slack_tune_prob:
+                run_slack_tune(force_dir=1)
+            elif (self.subg_slack_tune_cnt <=
+                  self.iters * self.subg_slack_tune_prob * 1.2 and
+                  self.rng.uniform() < self.subg_slack_tune_prob):
                 # tune by chance
-                run_tune()
-            subg_slack = self.subg_slack
+                run_slack_tune()
 
         fvals_new = np.array(ls_result.fvals_new)
-        idx0, idx1 = np.unravel_index(np.argmin(fvals_new), fvals_new.shape)
         # use the min ecountered so far, which is not worse than the line
         # search termination condition
-        if fvals_new[idx0, idx1] >= fval:
-            # line search is considered failed only if the best point makes no
-            # progress at all (even if termination condition is not met, we
-            # still accept the solution if it makes progress)
-            self._randomize_subg_slack(
-                f'no progress after line search (dx@dg={grad.dx_dg:.3g})')
-            return xk, IterStatus.retry
-
-        # now we know that current iteration makes descent progress
+        idx0, idx1 = np.unravel_index(np.argmin(fvals_new), fvals_new.shape)
+        assert fvals_new[idx0, idx1] < fval
 
         self.last_subg_slack = subg_slack
         self.subg_slack_is_from_random = False

@@ -126,6 +126,7 @@ class BundleSolver:
             total_time = timer.elapsed()
 
             # parse the log to extract function values at each iteration
+            ls_iters = len(fval_hist)
             fval_hist = np.array(fval_hist)
             iter_times = np.array(iter_times)
             sel_idx = []
@@ -158,7 +159,7 @@ class BundleSolver:
                 fval_hist=fval_hist,
                 iter_times=iter_times,
                 iters=stats['NITER'],
-                ls_tot_iters=-1,
+                ls_tot_iters=ls_iters,
                 time=total_time,
             )
 
