@@ -22,6 +22,7 @@ class Number:
     val: typing.Optional[float]
     bold: bool = False
     percent: bool = False
+    percent_prec: int = 0
     prefer_sci: bool = False
 
     def __lt__(self, other):
@@ -44,7 +45,7 @@ class Number:
         if self.val is None:
             return '-'
         if self.percent:
-            r = rf'{self.val*100:.0f}\%'
+            r = rf'{{:.{self.percent_prec}f}}\%'.format(self.val * 100)
         else:
             r = self.fmt(self.val, self.prefer_sci)
         if self.bold:
@@ -192,6 +193,11 @@ class BenchmarkSummarizer:
             for i in sub_table[:, -1]:
                 i.prefer_sci = True
 
+            if prob == 'All':
+                for i in sub_table:
+                    for j in range(len(self.eps_split)):
+                        i[j*3+2].percent_prec = 1
+
             table.append(sub_table)
 
         table = np.vstack(table)
@@ -262,6 +268,8 @@ class BenchmarkSummarizer:
                                 reduction=max if i == 2 else min)
 
     def _gmean(self, val, *, shift: float=0) -> float:
+        if np.all(val == 0):
+            return 0.0
         return gmean(val + shift) - shift
 
 
@@ -423,6 +431,37 @@ class LatexTableProc:
         lines[line] = content + lines[line]
         return self
 
+def write_defs(df: pd.DataFrame, fout):
+    def no_bold(x):
+        b = x.bold
+        x.bold = False
+        ret = repr(x)
+        x.bold = b
+        return ret
+
+    def wd(k, v):
+        if isinstance(v, Number):
+            v = no_bold(v)
+        print(rf'\newcommand{{\{k}}}{{{v}}}', file=fout)
+
+    trafs, gd, bundle = (
+        BenchmarkSummarizer.METHOD_DISP_NAMES[i]
+        for i in ['trafs', 'gd', 'bundle'])
+
+    col_time, col_rate = df.columns[4:6]
+
+    wd('trasSpeedup', '{:.1f}'.format(
+        df.loc[('All', bundle), col_time].val /
+        df.loc[('All', trafs), col_time].val
+    ))
+    wd('trasSolveRateCmp', '{:.1f}'.format(
+        df.loc[('All', trafs), col_rate].val /
+        df.loc[('All', bundle), col_rate].val
+    ))
+    wd('trasSolveRate', df.loc[('All', trafs), col_rate])
+    wd('gdSolveRate', df.loc[('All', gd), col_rate])
+    wd('bundleSolveRate', df.loc[('All', bundle), col_rate])
+
 def main():
     parser = argparse.ArgumentParser(
         description='Summarize benchmark results.',
@@ -450,8 +489,12 @@ def main():
              .add_multirow_header(2, 'Problem', 'Method')
              .as_str())
 
-    with open(args.output, 'w') as fout:
+    outp = Path(args.output)
+    with outp.open('w') as fout:
         fout.write(latex)
+
+    with outp.with_stem(outp.stem + '-defs').open('w') as fout:
+        write_defs(df, fout)
 
 if __name__ == '__main__':
     main()
