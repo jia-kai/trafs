@@ -39,7 +39,7 @@ class ProximalGradSolver:
 
         optimal = False
         timer = CPUTimer()
-        for _ in range(self.max_iters):
+        for iter_num in range(self.max_iters):
             fval, grad = obj.prox_f(xk, need_grad=True)
             fval_hist.append(fval + obj.prox_g(xk))
 
@@ -75,7 +75,7 @@ class ProximalGradSolver:
             fval=obj.eval(xk),
             fval_hist=np.array(fval_hist),
             iter_times=np.array(iter_times),
-            iters=self.max_iters,
+            iters=iter_num + 1,
             ls_tot_iters=ls_tot_iters,
             time=timer.elapsed(),
         )
