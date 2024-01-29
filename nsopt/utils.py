@@ -42,7 +42,8 @@ def default_make_ext_for_pyx(modname, pyxfilename):
     return Extension(
         name=modname,
         sources=[pyxfilename],
-        extra_compile_args=['-O3', '-ggdb', '-march=native', '-Wall'],
+        extra_compile_args=['-O3', '-ggdb', '-march=native', '-Wall',
+                            '-std=c++17'],
         language='c++',
         define_macros=[("NPY_NO_DEPRECATED_API", "NPY_1_7_API_VERSION")],
     )

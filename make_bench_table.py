@@ -24,6 +24,7 @@ class Number:
     percent: bool = False
     percent_prec: int = 0
     prefer_sci: bool = False
+    tnote: typing.Optional[str] = None
 
     def __lt__(self, other):
         assert isinstance(other, Number), other
@@ -50,6 +51,8 @@ class Number:
             r = self.fmt(self.val, self.prefer_sci)
         if self.bold:
             r = r'\textbf{' + r + '}'
+        if self.tnote is not None:
+            r += r'\tnote{' + self.tnote + '}'
         return r
 
     @classmethod
@@ -92,6 +95,10 @@ class BenchmarkSummarizer:
     }
     """name and order of methods to display"""
 
+    trafs_speedup: list[float]
+    """speedup of TRAFS over bundle for different eps values; filled by :meth:
+    `make_bench_table`"""
+
     def __init__(self, bench_dir: Path):
         results = {}
         nr_cases = 0
@@ -132,9 +139,8 @@ class BenchmarkSummarizer:
         )
         table = []
 
-        for prob_i, prob in enumerate(itertools.chain(
-                ProbMakers.all_makers().keys(),
-                ['All'])):
+        for prob in itertools.chain(ProbMakers.all_makers().keys(),
+                                    ['All']):
             results: list[dict[str, OptimizationResult]]
             methods: list[str]
             if prob != 'All':
@@ -154,11 +160,13 @@ class BenchmarkSummarizer:
                 [self.METHOD_DISP_NAMES[i] for i in methods]
             ))
 
+            opt_is_tight: bool = True
             def reduce_opt(r: dict[str, OptimizationResult]) -> float:
+                nonlocal opt_is_tight
                 r1 = min(v.fval for k, v in r.items() if k != 'optimal')
                 r2 = r['optimal']
                 if r2 is None:
-                    assert prob_i > 5
+                    opt_is_tight = False
                     return r1
                 assert r1 >= r2
                 return r2
@@ -198,6 +206,12 @@ class BenchmarkSummarizer:
                     for j in range(len(self.eps_split)):
                         i[j*3+2].percent_prec = 1
 
+                self._compute_speedup(results, fopts)
+
+            if not opt_is_tight:
+                for i in sub_table[:, -1]:
+                    i.tnote = r'*'
+
             table.append(sub_table)
 
         table = np.vstack(table)
@@ -205,6 +219,30 @@ class BenchmarkSummarizer:
             table, index=pd.MultiIndex.from_tuples(row_headers),
             columns=pd.MultiIndex.from_tuples(col_headers))
         return df
+
+    def _compute_speedup(self, results: list[dict[str, OptimizationResult]],
+                         fopts: npt.NDArray) -> None:
+
+        speedup = []
+
+        meth0 = 'trafs'
+        meth1 = 'bundle'
+        for eps in self.eps_split:
+            thresh = (1 + np.abs(fopts)) * eps + fopts
+            items = []
+            for ri, r in enumerate(results):
+                thresh_i = thresh[ri]
+
+                def get_time(rm: OptimizationResult):
+                    hist = rm.fval_hist
+                    idx = np.argmax(hist <= thresh_i)
+                    assert hist[idx] <= thresh_i
+                    return rm.iter_times[idx]
+
+                if max(r[meth0].fval, r[meth1].fval) <= thresh_i:
+                    items.append(get_time(r[meth1]) / get_time(r[meth0]))
+            speedup.append(self._gmean(items))
+        self.trafs_speedup = speedup
 
     def _fill_eps_perf(
             self, sub_table: npt.NDArray[np.object_],
@@ -268,6 +306,7 @@ class BenchmarkSummarizer:
                                 reduction=max if i == 2 else min)
 
     def _gmean(self, val, *, shift: float=0) -> float:
+        val = np.ascontiguousarray(val, dtype=np.float64)
         if np.all(val == 0):
             return 0.0
         return gmean(val + shift) - shift
@@ -431,7 +470,7 @@ class LatexTableProc:
         lines[line] = content + lines[line]
         return self
 
-def write_defs(df: pd.DataFrame, fout):
+def write_defs(summarizer: BenchmarkSummarizer, df: pd.DataFrame, fout):
     def no_bold(x):
         b = x.bold
         x.bold = False
@@ -448,12 +487,11 @@ def write_defs(df: pd.DataFrame, fout):
         BenchmarkSummarizer.METHOD_DISP_NAMES[i]
         for i in ['trafs', 'gd', 'bundle'])
 
-    col_time, col_rate = df.columns[4:6]
+    col_rate = df.columns[5]
 
-    wd('trasSpeedup', '{:.1f}'.format(
-        df.loc[('All', bundle), col_time].val /
-        df.loc[('All', trafs), col_time].val
-    ))
+    for i, s in enumerate(summarizer.trafs_speedup):
+        wd(f'trasSpeedup{chr(ord("A")+i)}', f'{s:.1f}')
+
     wd('trasSolveRateCmp', '{:.1f}'.format(
         df.loc[('All', trafs), col_rate].val /
         df.loc[('All', bundle), col_rate].val
@@ -494,7 +532,7 @@ def main():
         fout.write(latex)
 
     with outp.with_stem(outp.stem + '-defs').open('w') as fout:
-        write_defs(df, fout)
+        write_defs(summarizer, df, fout)
 
 if __name__ == '__main__':
     main()
