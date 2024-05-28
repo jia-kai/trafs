@@ -8,6 +8,9 @@ import attrs
 import pandas as pd
 import numpy as np
 import numpy.typing as npt
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 from scipy.stats.mstats import gmean
 
 import argparse
@@ -96,8 +99,8 @@ class BenchmarkSummarizer:
     """name and order of methods to display"""
 
     trafs_speedup: list[float]
-    """speedup of TRAFS over bundle for different eps values; filled by :meth:
-    `make_bench_table`"""
+    """speedup of TRAFS over bundle for different eps values; filled by
+    :meth:`make_bench_table`"""
 
     def __init__(self, bench_dir: Path):
         results = {}
@@ -500,23 +503,87 @@ def write_defs(summarizer: BenchmarkSummarizer, df: pd.DataFrame, fout):
     wd('gdSolveRate', df.loc[('All', gd), col_rate])
     wd('bundleSolveRate', df.loc[('All', bundle), col_rate])
 
-def main():
-    parser = argparse.ArgumentParser(
-        description='Summarize benchmark results.',
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--bench-dir', default='bench-out',
-                        help='directory to load benchmark results')
-    parser.add_argument('-o', '--output', required=True,
-                        help='output latex file')
-    parser.add_argument('--print', action='store_true',
-                        help='print the table to stdout')
-    args = parser.parse_args()
+def plot_result(df: pd.DataFrame, eps_i, outfile: str):
+    meth2id = [(v, i) for i, v in
+               enumerate(BenchmarkSummarizer.METHOD_DISP_NAMES.values())]
 
-    summarizer = BenchmarkSummarizer(Path(args.bench_dir))
-    df = summarizer.make_bench_table()
-    if args.print:
-        print(df)
+    plot_x = []
+    plot_y = []
+    plot_meth = []
 
+    nan_bars_idx = []
+    bar_group_width = 0.9
+    bar_width_with_sep = bar_group_width / len(meth2id)
+
+    for prob_i, prob in enumerate(ProbMakers.all_makers().keys()):
+        for meth, meth_i in meth2id:
+            try:
+                data = df.loc[(prob, meth)]
+            except KeyError:
+                continue
+            val = data.iloc[eps_i * 3].val
+            plot_x.append(prob_i + meth_i * bar_width_with_sep)
+            plot_meth.append(meth_i)
+            if val is None:
+                nan_bars_idx.append(len(plot_y))
+                plot_y.append(0)
+            else:
+                plot_y.append(val)
+
+    fig, ax = plt.subplots(figsize=(9 * 0.7, 6 * 0.7))
+    color_palette = ['#E63946', '#457B9D', '#F4A261',
+                     '#2A9D8F', '#A8DADC',
+                     '#1D3557']
+
+    plot_x = np.array(plot_x)
+    plot_y = np.array(plot_y)
+    nan_bars_idx = np.array(nan_bars_idx)
+    plot_meth = np.array(plot_meth)
+    plot_y[nan_bars_idx] = plot_y.max() * 2
+    label_map = {
+        r'\tras{}': 'TRAFS (ours)',
+        r'\SAtwo{}': r'$\text{SA}_2$',
+    }
+    mpl.rcParams['hatch.linewidth'] = .6
+    hatch_color = '#F1FAEE'
+    hatches = np.array([''] * len(plot_x), dtype=object)
+    hatches[nan_bars_idx] = 'xx'
+    for i in range(len(meth2id)):
+        mask = plot_meth == i
+        ax.bar(
+            plot_x[mask], plot_y[mask], width=bar_width_with_sep * .9,
+            color=color_palette[i],
+            hatch=hatches[mask],
+            edgecolor=hatch_color, linewidth=0,
+        )
+    ax.grid(axis='y', linestyle='--', alpha=0.5)
+    ax.set_xticks(np.arange(len(ProbMakers.all_makers())) +
+                  bar_group_width / 2)
+    ax.set_xticklabels(ProbMakers.all_makers().keys())
+    ax.set_xlabel('Problem class (50 instances in each class)')
+    eps_exp = [-3, -6]
+    assert BenchmarkSummarizer.eps_split[eps_i] == 10**eps_exp[eps_i]
+    ax.set_ylabel(r'Normalized mean solving time to reach $\epsilon \leq 10^{'
+                  + str(eps_exp[eps_i]) + '}$')
+    handles = [
+        mpatches.Patch(
+            color=color_palette[i], label=label_map.get(label, label))
+        for label, i in meth2id
+    ]
+    handles.append(mpatches.Patch(
+        facecolor='white', hatch='xxx', label='Failed to solve',
+        edgecolor='black', linewidth=0
+    ))
+    ax.legend(loc='upper right', fancybox=True, framealpha=0.5,
+              handles=handles)
+    ax.set_yscale('log')
+    ax.set_ylim(0.2, plot_y.max())
+    fig.tight_layout()
+    fig.savefig(outfile, metadata={'CreationDate': None},
+                dpi=300, bbox_inches='tight')
+
+def write_to_latex(summarizer: BenchmarkSummarizer,
+                   df: pd.DataFrame, outfile: str):
     latex = df.style.to_latex(
         hrules=True, clines='skip-last;data',
         multicol_align='c', column_format='ll' + 'r'*df.shape[1],
@@ -527,12 +594,39 @@ def main():
              .add_multirow_header(2, 'Problem', 'Method')
              .as_str())
 
-    outp = Path(args.output)
+    outp = Path(outfile)
     with outp.open('w') as fout:
         fout.write(latex)
 
     with outp.with_stem(outp.stem + '-defs').open('w') as fout:
         write_defs(summarizer, df, fout)
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Summarize benchmark results.',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('--bench-dir', default='bench-out',
+                        help='directory to load benchmark results')
+    parser.add_argument('-t', '--latex', help='output to latex file')
+    parser.add_argument('-p', '--plot',
+                        help='plot the table to files; two files are generated '
+                        'with the given prefix')
+    parser.add_argument('--plot-ft', help='file type for plot', default='pdf')
+    parser.add_argument('--print', action='store_true',
+                        help='print the table to stdout')
+    args = parser.parse_args()
+
+    summarizer = BenchmarkSummarizer(Path(args.bench_dir))
+    df = summarizer.make_bench_table()
+    if args.print:
+        print(df)
+
+    if args.plot:
+        for i in range(len(summarizer.eps_split)):
+            plot_result(df, i, f'{args.plot}-{i}.{args.plot_ft}')
+
+    if args.latex:
+        write_to_latex(summarizer, df, args.latex)
 
 if __name__ == '__main__':
     main()
