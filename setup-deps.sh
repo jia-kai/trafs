@@ -2,6 +2,12 @@
 
 # setup the extra dependencies (which require custom compilation)
 
+root=$(readlink -f "$(dirname "$0")")
+export JULIA_PROJECT="$root/.julia-env"
+export JULIA_LOAD_PATH="@:@stdlib"
+export JULIA_DEPOT_PATH="$root/.julia-depot:"
+mkdir -p "$JULIA_PROJECT" "$root/.julia-depot"
+
 if ! julia -e 'using MPBNGCInterface' > /dev/null 2>&1; then
     echo "MPBNGCInterface.jl not present, installing..."
     path=$(readlink -f $(dirname $0)/third-party/MPBNGCInterface.jl)
@@ -10,15 +16,12 @@ if ! julia -e 'using MPBNGCInterface' > /dev/null 2>&1; then
         Pkg.build(); Pkg.precompile(); Pkg.instantiate()"
 fi
 
-if ! python -c 'import julia; julia.install()'; then
+if ! uv run --project "$root" python -c 'import julia; julia.install()'; then
     echo "Failed to install pyjulia"
-    echo "Please install the julia package(with pip) or the pyjulia package(with conda)"
     exit 1
 fi
 
-if ( ! python -c 'import piqptr' ) || [ "$1" = "--piqp" ] ; then
+if ( ! uv run --project "$root" python -c 'import piqptr' ) || [ "$1" = "--piqp" ] ; then
     echo "Building the customized PIQP solver"
-    cd third-party/piqp
-    python setup.py build
-    python setup.py install
+    uv pip install --project "$root" -e "$root/third-party/piqp"
 fi

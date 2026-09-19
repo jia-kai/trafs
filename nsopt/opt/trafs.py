@@ -1,16 +1,18 @@
+from ..utils import CPUTimer, setup_pyx_import
 from .shared import Optimizable, OptimizationResult, TRAFSStep
-from ..utils import setup_pyx_import, CPUTimer
+
 with setup_pyx_import():
     from .trafs_utils import RotationBuffer
 
-import attrs
+import copy
+import enum
+import typing
+from dataclasses import dataclass, field
+
 import numpy as np
 
-import typing
-import enum
-import copy
 
-@attrs.frozen(kw_only=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class TRAFSSolver:
     """the Trust Region Adversarial Functional Subdifferential method"""
 
@@ -23,14 +25,14 @@ class TRAFSSolver:
     ls_min_step: float = 1e-9
     """minimum step length in line search before giving up"""
 
-    ls_tau: float = .8
+    ls_tau: float = 0.8
     """line search step decay"""
 
-    ls_rho: float = .5
+    ls_rho: float = 0.5
     """line search sufficient decrease constant"""
 
     ls_batch_size: int = 8
-    """number of points to be concurrently evaluated in line search"""""
+    """number of points to be concurrently evaluated in line search""" ""
 
     norm_hist_winsize: int = 8
     """window size for the step norm history"""
@@ -45,17 +47,17 @@ class TRAFSSolver:
     subg_slack_init: float = 0.1
     """functional subdifferential eps to use in the first iteration"""
 
-    subg_slack_decay: float = .5
+    subg_slack_decay: float = 0.5
     """eps decay factor when -dx @ dg is not big enough"""
 
     subg_slack_incr: float = 1.5
     """eps increase factor when -dx @ dg is big enough"""
 
-    subg_slack_tune_prob: float = .2
+    subg_slack_tune_prob: float = 0.2
     """probability to automatically tune eps by computing another step using the
     same xk"""
 
-    subg_slack_tune_prob_high: float = .8
+    subg_slack_tune_prob_high: float = 0.8
     """probability to tune eps when previous tuning succeeded"""
 
     subg_slack_tune_max_nr_try: int = 12
@@ -65,13 +67,13 @@ class TRAFSSolver:
     subg_slack_est_winsize: int = 8
     """window size for the slack estimation"""
 
-    subg_slack_est_mul_min: float = .5
+    subg_slack_est_mul_min: float = 0.5
     """min multiplier to be applied to do slack estimation"""
 
     subg_slack_est_mul_max: float = 1e5
     """max multiplier to be applied to do slack estimation"""
 
-    max_iters: typing.Optional[int] = None
+    max_iters: int | None = None
     """max number of iterations"""
 
     verbose: bool = False
@@ -83,15 +85,13 @@ class TRAFSSolver:
     max_fail_iters: int = 10
     """max number of failed iterations before giving up"""
 
-    rng: np.random.Generator = attrs.field(
-        factory=lambda: np.random.default_rng(42)
-    )
+    rng: np.random.Generator = field(default_factory=lambda: np.random.default_rng(42))
 
     def solve(self, obj: Optimizable) -> OptimizationResult:
         """solve with adatptive steps"""
         xk = obj.x0.copy()
         assert xk.ndim == 1
-        runtime = TRAFSRuntime(self, obj)
+        runtime = TRAFSRuntime(solver=self, obj=obj)
         while True:
             xk, status = runtime.next_iter(xk)
             if status != IterStatus.succeeded:
@@ -100,9 +100,12 @@ class TRAFSSolver:
         xk = obj.proj(xk)
         return OptimizationResult(
             optimal=status == IterStatus.optimal,
-            x=xk, fval=obj.eval(xk), fval_hist=np.array(runtime.fval_hist),
+            x=xk,
+            fval=obj.eval(xk),
+            fval_hist=np.array(runtime.fval_hist),
             iter_times=np.array(runtime.iter_times),
-            iters=runtime.iters, ls_tot_iters=runtime.ls_tot_iters,
+            iters=runtime.iters,
+            ls_tot_iters=runtime.ls_tot_iters,
             time=runtime.timer.elapsed(),
         )
 
@@ -112,7 +115,7 @@ class TRAFSSolver:
             print(msg, flush=True)
 
 
-@attrs.frozen
+@dataclass(frozen=True, slots=True)
 class LineSearchResult:
     """result of batched line search;
     ``dx_new``, ``xnew``, ``fvals_new`` are lists where each item corresponds to
@@ -127,42 +130,42 @@ class LineSearchResult:
 
 
 class IterStatus(enum.Enum):
-    succeeded = 'succeeded'
+    succeeded = "succeeded"
     """current iteration succeeded, move on to next iteration"""
 
-    retry = 'retry'
+    retry = "retry"
     """retry current iteration (do not record iter number and history); used
     internally by :class:`TRAFSRuntime`"""
 
-    optimal = 'optimal'
+    optimal = "optimal"
     """optimal solution found"""
 
-    failed = 'failed'
+    failed = "failed"
     """failed to find a solution; do not run any more iterations"""
 
 
-@attrs.define
+@dataclass(slots=True)
 class TRAFSRuntime:
     """stateful iterations of the TRAFS method; used internally by :class:
     `TRAFSSolver`"""
 
     obj: Optimizable
-    solver: "TRAFSSolver"
+    solver: TRAFSSolver
 
-    subg_slack: float
+    subg_slack: float = field(init=False)
     """current eps in functional subdifferential"""
 
-    min_subg_slack: float
+    min_subg_slack: float = field(init=False)
 
-    ls_steps_init: np.ndarray
-    ls_steps_grow: np.ndarray
+    ls_steps_init: np.ndarray = field(init=False)
+    ls_steps_grow: np.ndarray = field(init=False)
 
-    norm_hist: RotationBuffer
-    subg_slack_est_hist: RotationBuffer
+    norm_hist: RotationBuffer = field(init=False)
+    subg_slack_est_hist: RotationBuffer = field(init=False)
 
-    subg_slack_tune_prob: float
+    subg_slack_tune_prob: float = field(init=False)
 
-    rng: np.random.Generator
+    rng: np.random.Generator = field(init=False)
 
     subg_slack_tune_cnt: int = 0
     """number of times eps is tuned; used to control overhead of random
@@ -180,34 +183,31 @@ class TRAFSRuntime:
     ever used"""
 
     fval_lb: float = -np.inf
-    timer: CPUTimer = attrs.field(factory=CPUTimer)
+    timer: CPUTimer = field(default_factory=CPUTimer)
     ls_tot_iters: int = 0
     iters: int = 0
-    iter_times: list[float] = attrs.field(factory=list)
-    fval_hist: list[float] = attrs.field(factory=list)
+    iter_times: list[float] = field(default_factory=list)
+    fval_hist: list[float] = field(default_factory=list)
     failed_iters: int = 0
-    obj_grad_state: dict = attrs.field(factory=dict)
+    obj_grad_state: dict = field(default_factory=dict)
 
-    def __init__(self, solver: "TRAFSSolver", obj: Optimizable):
+    def __post_init__(self) -> None:
         # copy the rng state to ensure multiple runs with the same RNG are
         # reproducible
-        rng_seed = copy.deepcopy(solver.rng).bytes(16)
-        self.__attrs_init__(
-            obj=obj,
-            solver=solver,
-            subg_slack=solver.subg_slack_init,
-            min_subg_slack=min(solver.eps_term / 10, 1e-10),
-            ls_steps_init=np.power(solver.ls_tau,
-                                   np.arange(solver.ls_batch_size)),
-            ls_steps_grow=np.power(solver.ls_tau, solver.ls_batch_size),
-            norm_hist=RotationBuffer(solver.norm_hist_winsize),
-            subg_slack_est_hist=RotationBuffer(solver.subg_slack_est_winsize),
-            subg_slack_tune_prob=solver.subg_slack_tune_prob,
-            rng=np.random.default_rng(
-                list(rng_seed) +
-                list(map(ord, obj.__class__.__name__)) +
-                [obj.x0.size]
-            )
+        rng_seed = copy.deepcopy(self.solver.rng).bytes(16)
+        self.subg_slack = self.solver.subg_slack_init
+        self.min_subg_slack = min(self.solver.eps_term / 10, 1e-10)
+        self.ls_steps_init = np.power(
+            self.solver.ls_tau, np.arange(self.solver.ls_batch_size)
+        )
+        self.ls_steps_grow = np.power(self.solver.ls_tau, self.solver.ls_batch_size)
+        self.norm_hist = RotationBuffer(self.solver.norm_hist_winsize)
+        self.subg_slack_est_hist = RotationBuffer(self.solver.subg_slack_est_winsize)
+        self.subg_slack_tune_prob = self.solver.subg_slack_tune_prob
+        self.rng = np.random.default_rng(
+            list(rng_seed)
+            + list(map(ord, self.obj.__class__.__name__))
+            + [self.obj.x0.size]
         )
 
     def _randomize_subg_slack(self, reason: str):
@@ -218,21 +218,24 @@ class TRAFSRuntime:
         kmax = np.log(1000)
         self.subg_slack = max(
             np.exp(self.rng.uniform(kmin, kmax)) * self.last_subg_slack,
-            self.min_subg_slack)
+            self.min_subg_slack,
+        )
         self.logmsg(
-            f'failed to find descent direction due to {reason};'
-            f' randomize eps {self.subg_slack:.3g}')
+            f"failed to find descent direction due to {reason};"
+            f" randomize eps {self.subg_slack:.3g}"
+        )
 
     def _batched_linesearch(self, grad: TRAFSStep, fval, xk) -> LineSearchResult:
         all_dx_new = []
         all_xnew = []
         all_fvals_new = []
+
         def make_ret(last_step):
             return LineSearchResult(
                 last_step=last_step,
                 dx_new=all_dx_new,
                 xnew=all_xnew,
-                fvals_new=all_fvals_new
+                fvals_new=all_fvals_new,
             )
 
         ls_steps = self.ls_steps_init.copy()
@@ -246,7 +249,7 @@ class TRAFSRuntime:
             all_dx_new.append(dx_new)
             all_xnew.append(xnew)
             all_fvals_new.append(fvals_new)
-            valid_mask = (fvals_new <= fval + ls_rho * grad.dx_dg * ls_steps)
+            valid_mask = fvals_new <= fval + ls_rho * grad.dx_dg * ls_steps
             if np.any(valid_mask):
                 return make_ret(ls_steps[np.argmax(valid_mask)])
             if ls_steps[0] < min_step:
@@ -255,7 +258,7 @@ class TRAFSRuntime:
 
     def logmsg(self, msg):
         if self.solver.verbose:
-            self.solver.logmsg(f'{self.iters}: ' + msg)
+            self.solver.logmsg(f"{self.iters}: " + msg)
 
     def next_iter(self, xk: np.ndarray) -> tuple[np.ndarray, IterStatus]:
         """do the next iteration
@@ -266,12 +269,12 @@ class TRAFSRuntime:
 
         self.iters += 1
         if solver.max_iters is not None and self.iters >= solver.max_iters:
-            self.logmsg(f'max iters reached')
+            self.logmsg("max iters reached")
             return xk, IterStatus.failed
 
         self.failed_iters += 1
         if self.failed_iters > self.solver.max_fail_iters:
-            self.logmsg('did not converge due to too many failed iterations')
+            self.logmsg("did not converge due to too many failed iterations")
             return xk, IterStatus.failed
 
         xk = obj.proj(xk)
@@ -287,11 +290,13 @@ class TRAFSRuntime:
         return xk, status
 
     def _tune_subg_slack(
-            self,
-            xk, fval,
-            ls_result: LineSearchResult, grad: TRAFSStep,
-            get_grad: typing.Callable[[float], TRAFSStep]) -> tuple[
-                bool, LineSearchResult, TRAFSStep]:
+        self,
+        xk,
+        fval,
+        ls_result: LineSearchResult,
+        grad: TRAFSStep,
+        get_grad: typing.Callable[[float], TRAFSStep],
+    ) -> tuple[bool, LineSearchResult, TRAFSStep]:
         """try tuning the eps
         :return: whether better eps is found, new line search result, new grad
         """
@@ -301,8 +306,7 @@ class TRAFSRuntime:
         tune_dir = self.subg_slack_tune_dir
         if tune_dir == 0:
             tune_dir = int(self.rng.integers(2)) * 2 - 1
-        if (tune_dir < 0 and
-                subg_slack * solver.subg_slack_decay < self.min_subg_slack):
+        if tune_dir < 0 and subg_slack * solver.subg_slack_decay < self.min_subg_slack:
             tune_dir = 1
 
         if tune_dir == 1:
@@ -314,8 +318,10 @@ class TRAFSRuntime:
         new_slack = subg_slack * k
         slack_mul = k
         nr_try = 0
-        while (new_slack >= self.min_subg_slack and
-               nr_try < solver.subg_slack_tune_max_nr_try):
+        while (
+            new_slack >= self.min_subg_slack
+            and nr_try < solver.subg_slack_tune_max_nr_try
+        ):
             new_grad = get_grad(new_slack)
             if not np.all(new_grad.dx == grad.dx):
                 break
@@ -323,9 +329,11 @@ class TRAFSRuntime:
             new_slack *= k
             nr_try += 1
         else:
-            self.logmsg(f'auto eps tuning({tune_dir}):'
-                        ' grad does not change up to eps'
-                        f' {subg_slack:.3g}=>{new_slack:.3g} ({nr_try} tries)')
+            self.logmsg(
+                f"auto eps tuning({tune_dir}):"
+                " grad does not change up to eps"
+                f" {subg_slack:.3g}=>{new_slack:.3g} ({nr_try} tries)"
+            )
             self.subg_slack_tune_dir = -tune_dir
             return False, ls_result, grad
         if new_grad.dx_dg >= 0:
@@ -334,36 +342,35 @@ class TRAFSRuntime:
                 self.subg_slack_tune_dir = -1
             else:
                 self.subg_slack_tune_dir = 0
-            self.logmsg(f'auto eps tuning({tune_dir}):'
-                        ' new grad makes no progress')
+            self.logmsg(f"auto eps tuning({tune_dir}): new grad makes no progress")
             return False, ls_result, grad
 
         new_ls = self._batched_linesearch(new_grad, fval, xk)
         old_decr = ls_result.last_step * grad.dx_dg
         new_decr = new_ls.last_step * new_grad.dx_dg
 
-        if solver.verbose:
-            msg = (
-                f'auto eps tuning({tune_dir}): '
-                f' mul={slack_mul:.3g}'
-                f' ls_step: {ls_result.last_step:.3g} => {new_ls.last_step:.3g}'
-                f' dx@dg: {grad.dx_dg:.3g} => {new_grad.dx_dg:.3g}')
+        msg = (
+            f"auto eps tuning({tune_dir}): "
+            f" mul={slack_mul:.3g}"
+            f" ls_step: {ls_result.last_step:.3g} => {new_ls.last_step:.3g}"
+            f" dx@dg: {grad.dx_dg:.3g} => {new_grad.dx_dg:.3g}"
+        )
 
         if new_decr < old_decr:
             if solver.verbose:
-                msg += ' (accepted)'
+                msg += " (accepted)"
             self.subg_slack = new_slack
             self.subg_slack_est_mul = max(
                 solver.subg_slack_est_mul_min,
-                min(self.subg_slack_est_mul * slack_mul,
-                    solver.subg_slack_est_mul_max))
+                min(self.subg_slack_est_mul * slack_mul, solver.subg_slack_est_mul_max),
+            )
             self.subg_slack_tune_dir = tune_dir
             ls_result = new_ls
             grad = new_grad
             accepted = True
         else:
             if solver.verbose:
-                msg += ' (rejected)'
+                msg += " (rejected)"
             self.subg_slack_tune_dir = -tune_dir
             accepted = False
 
@@ -373,8 +380,8 @@ class TRAFSRuntime:
         return accepted, ls_result, grad
 
     def _do_next_iter(
-            self, xk: np.ndarray, fval: float,
-            sub_diff: Optimizable.SubDiff) -> tuple[np.ndarray, IterStatus]:
+        self, xk: np.ndarray, fval: float, sub_diff: Optimizable.SubDiff
+    ) -> tuple[np.ndarray, IterStatus]:
         solver = self.solver
 
         norm_bound = self.norm_hist.max() * solver.norm_hist_mul
@@ -387,7 +394,7 @@ class TRAFSRuntime:
                 subg_slack=slack,
                 df_lb_thresh=self.fval_lb + slack - fval,
                 norm_bound=norm_bound,
-                state=self.obj_grad_state
+                state=self.obj_grad_state,
             )
 
         subg_slack = self.subg_slack
@@ -399,16 +406,18 @@ class TRAFSRuntime:
             fval_lb = max(fval_lb, fval + grad.df_lb - subg_slack)
             self.fval_lb = fval_lb
             assert fval_lb <= fval + 1e-6, (
-                f'(lb={self.fval_lb:.3g}) > (fval={fval:.3g}):'
-                f'd={self.fval_lb - fval:.3g}'
-                f' |x|={np.linalg.norm(xk, ord=2):.3g}'
-                f' {grad.df_lb=:.3g} eps={subg_slack:.3g}'
+                f"(lb={self.fval_lb:.3g}) > (fval={fval:.3g}):"
+                f"d={self.fval_lb - fval:.3g}"
+                f" |x|={np.linalg.norm(xk, ord=2):.3g}"
+                f" {grad.df_lb=:.3g} eps={subg_slack:.3g}"
             )
 
         if fval - fval_lb <= solver.eps_term:
-            self.logmsg(f'finished with {fval_lb=:.3g} {fval=:.3g}'
-                        f' (df_lb={grad.df_lb:.3g} eps={subg_slack:.3g}'
-                        f' ||x||={np.linalg.norm(xk, ord=2):.3g})')
+            self.logmsg(
+                f"finished with {fval_lb=:.3g} {fval=:.3g}"
+                f" (df_lb={grad.df_lb:.3g} eps={subg_slack:.3g}"
+                f" ||x||={np.linalg.norm(xk, ord=2):.3g})"
+            )
             return xk, IterStatus.optimal
 
         if grad.dx_dg >= 0:
@@ -418,17 +427,18 @@ class TRAFSRuntime:
                 self.subg_slack *= solver.subg_slack_decay
                 self.subg_slack_est_mul = max(
                     solver.subg_slack_est_mul_min,
-                    self.subg_slack_est_mul * solver.subg_slack_decay)
+                    self.subg_slack_est_mul * solver.subg_slack_decay,
+                )
 
             if grad.df_lb_is_global:
                 if subg_slack * solver.subg_slack_decay <= self.min_subg_slack:
                     self._randomize_subg_slack(
-                        'dx@dg = 0 with global guarantee, but eps is too small')
+                        "dx@dg = 0 with global guarantee, but eps is too small"
+                    )
                     return xk, IterStatus.retry
 
                 decay_slack()
-                self.logmsg(f'eps decayed to {self.subg_slack:.3g}'
-                            ' due to dx@dg = 0')
+                self.logmsg(f"eps decayed to {self.subg_slack:.3g} due to dx@dg = 0")
                 if not self.subg_slack_is_from_random:
                     # this iteration is considered successful as we have
                     # decreased eps with global bound
@@ -440,32 +450,34 @@ class TRAFSRuntime:
                     assert self.failed_iters > 0
                     self.failed_iters -= 1
             else:
-                if (self.subg_slack * solver.subg_slack_decay ** 5 >
-                        self.min_subg_slack):
+                if self.subg_slack * solver.subg_slack_decay**5 > self.min_subg_slack:
                     # when current slack is large, it is likely that
                     # df_lb_is_global being false is due to the solver is unable
                     # to prove global lower bound
                     decay_slack()
-                    self.logmsg(f'eps decayed to {self.subg_slack:.3g}'
-                                ' due to dx@dg = 0 without global guarantee but'
-                                ' large enough')
+                    self.logmsg(
+                        f"eps decayed to {self.subg_slack:.3g}"
+                        " due to dx@dg = 0 without global guarantee but"
+                        " large enough"
+                    )
                     # similar to above, only count random slack as failed
                     assert self.failed_iters > 0
                     self.failed_iters -= 1
                 else:
-                    self._randomize_subg_slack(
-                        'dx@dg = 0 without global guarantee')
+                    self._randomize_subg_slack("dx@dg = 0 without global guarantee")
             return xk, IterStatus.retry
 
         ls_result = self._batched_linesearch(grad, fval, xk)
 
         subg_slack_tuned = False
+
         def run_slack_tune(force_dir=None) -> bool:
             nonlocal subg_slack_tuned, subg_slack, ls_result, grad
             if force_dir is not None:
                 self.subg_slack_tune_dir = force_dir
             subg_slack_tuned, ls_result, grad = self._tune_subg_slack(
-                xk, fval, ls_result, grad, get_grad)
+                xk, fval, ls_result, grad, get_grad
+            )
             subg_slack = self.subg_slack
             if subg_slack_tuned:
                 self.subg_slack_tune_prob = solver.subg_slack_tune_prob_high
@@ -480,20 +492,24 @@ class TRAFSRuntime:
             if not subg_slack_tuned:
                 run_slack_tune(force_dir=1)
             if not subg_slack_tuned or all(
-                    i.min() >= fval for i in ls_result.fvals_new):
+                i.min() >= fval for i in ls_result.fvals_new
+            ):
                 # randomization as a last resort
                 self._randomize_subg_slack(
-                    f'no progress after line search (dx@dg={grad.dx_dg:.3g})')
+                    f"no progress after line search (dx@dg={grad.dx_dg:.3g})"
+                )
                 return xk, IterStatus.retry
         elif self.iters >= 2:
             if grad.dx_dg <= -subg_slack * (solver.subg_slack_incr * 2 - 1):
                 # dx_dg seems large enough, try increasing eps
-                self.logmsg(f'try increasing eps since dx@dg = {grad.dx_dg:.3g}'
-                            ' is large enough')
+                self.logmsg(
+                    f"try increasing eps since dx@dg = {grad.dx_dg:.3g} is large enough"
+                )
                 run_slack_tune(force_dir=1)
-            elif (self.subg_slack_tune_cnt <=
-                  self.iters * self.subg_slack_tune_prob * 1.2 and
-                  self.rng.uniform() < self.subg_slack_tune_prob):
+            elif (
+                self.subg_slack_tune_cnt <= self.iters * self.subg_slack_tune_prob * 1.2
+                and self.rng.uniform() < self.subg_slack_tune_prob
+            ):
                 # tune by chance
                 run_slack_tune()
 
@@ -515,12 +531,13 @@ class TRAFSRuntime:
 
         if solver.verbose and self.iters % solver.verbose_iters == 0:
             self.logmsg(
-                f'f={fval:.2g}(d={df:.1e},lb={fval_lb:.1g})'
-                f' g={grad.dx_dg:.1e}'
-                f' dx={dx_l2:<.1e}'
-                f' ls={ls_result.last_step:<.1g}'
-                f' nb={norm_bound:.0e}'
-                f' eps={subg_slack:.1g}/{self.subg_slack_est_mul:.1g}')
+                f"f={fval:.2g}(d={df:.1e},lb={fval_lb:.1g})"
+                f" g={grad.dx_dg:.1e}"
+                f" dx={dx_l2:<.1e}"
+                f" ls={ls_result.last_step:<.1g}"
+                f" nb={norm_bound:.0e}"
+                f" eps={subg_slack:.1g}/{self.subg_slack_est_mul:.1g}"
+            )
 
         # adjust slack
         if not subg_slack_tuned:
@@ -532,8 +549,9 @@ class TRAFSRuntime:
             subg_slack = max(
                 self.min_subg_slack,
                 min(
-                    subg_slack,
-                    self.subg_slack_est_hist.max() * self.subg_slack_est_mul))
+                    subg_slack, self.subg_slack_est_hist.max() * self.subg_slack_est_mul
+                ),
+            )
 
         # if fval_lb is good enough we can use this bound
         subg_slack = min(subg_slack, (fval - fval_lb) / 2)

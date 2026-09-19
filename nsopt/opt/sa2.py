@@ -1,11 +1,16 @@
-from .shared import (OptimizationResult, KnownLipschitzOptimizable,
-                     UnconstrainedOptimizable)
-from ..utils import CPUTimer
+from dataclasses import dataclass
 
-import attrs
 import numpy as np
 
-@attrs.define(kw_only=True)
+from ..utils import CPUTimer
+from .shared import (
+    KnownLipschitzOptimizable,
+    OptimizationResult,
+    UnconstrainedOptimizable,
+)
+
+
+@dataclass(slots=True, kw_only=True)
 class SA2Solver:
     """Subgradient Method with Double Simple Averaging"""
 
@@ -17,6 +22,7 @@ class SA2Solver:
         fval_hist = []
         iter_times = []
         xk = obj.x0.copy()
+        avg_grad = np.zeros_like(xk)
 
         if isinstance(obj, KnownLipschitzOptimizable):
             param = obj.eval_cvx_params()
@@ -30,10 +36,7 @@ class SA2Solver:
             fval_hist.append(fval)
             grad = subgrad.take_arbitrary()
 
-            if i == 0:
-                avg_grad = grad
-            else:
-                avg_grad = avg_grad * (i / (i + 1)) + grad / (i + 1)
+            avg_grad = avg_grad * (i / (i + 1)) + grad / (i + 1)
 
             eta = np.sqrt(i + 1) * lr_mul
             xkp = obj.x0 - eta * avg_grad

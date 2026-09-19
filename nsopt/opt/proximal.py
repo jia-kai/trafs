@@ -1,14 +1,16 @@
-from .shared import OptimizationResult, ProximalGradOptimizable
-from ..utils import CPUTimer
+from dataclasses import dataclass
 
-import attrs
 import numpy as np
 
-@attrs.define(kw_only=True)
+from ..utils import CPUTimer
+from .shared import OptimizationResult, ProximalGradOptimizable
+
+
+@dataclass(slots=True, kw_only=True)
 class ProximalGradSolver:
     """the accelerated proximal gradient method; see Beck, A., & Teboulle, M.
     (2009). A Fast Iterative Shrinkage-Thresholding Algorithm for Linear Inverse
-    Problems. SIAM Journal on Imaging Sciences, 2(1), 183–202. doi:
+    Problems. SIAM Journal on Imaging Sciences, 2(1), 183-202. doi:
     10.1137/080716542
     """
 
@@ -33,20 +35,19 @@ class ProximalGradSolver:
         L = self.init_L
         ls_tot_iters = 0
 
-        if self.use_fast:
-            tk = np.array(1, dtype=np.float128)
-            prox_old = xk
+        tk = np.array(1, dtype=np.float128)
+        prox_old = xk
 
         optimal = False
         timer = CPUTimer()
-        for iter_num in range(self.max_iters):
+        for _ in range(self.max_iters):
             fval, grad = obj.prox_f(xk, need_grad=True)
             fval_hist.append(fval + obj.prox_g(xk))
 
             while True:
                 xnew = obj.prox_minx(xk - grad / L, L)
                 d = xnew - xk
-                thresh = fval + d.dot(grad) + L/2 * d.dot(d) + obj.prox_g(xnew)
+                thresh = fval + d.dot(grad) + L / 2 * d.dot(d) + obj.prox_g(xnew)
                 if obj.eval(xnew) <= thresh:
                     break
                 ls_tot_iters += 1
@@ -60,22 +61,22 @@ class ProximalGradSolver:
             if optimal:
                 break
             if self.use_fast:
-                tnew = (1. + np.sqrt(1. + 4. * tk * tk)) / 2.
+                tnew = (1.0 + np.sqrt(1.0 + 4.0 * tk * tk)) / 2.0
                 prox_new = xnew
-                xnew = xnew + ((tk - 1.) / tnew) * (xnew - prox_old)
+                xnew = xnew + ((tk - 1.0) / tnew) * (xnew - prox_old)
                 prox_old = prox_new
                 tk = tnew
             xk = xnew
             iter_times.append(timer.elapsed())
 
-        assert ls_tot_iters > 0, 'initial L is too large'
+        assert ls_tot_iters > 0, "initial L is too large"
         return OptimizationResult(
             optimal=optimal,
             x=xk,
             fval=obj.eval(xk),
             fval_hist=np.array(fval_hist),
             iter_times=np.array(iter_times),
-            iters=iter_num + 1,
+            iters=len(fval_hist),
             ls_tot_iters=ls_tot_iters,
             time=timer.elapsed(),
         )

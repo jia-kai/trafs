@@ -1,30 +1,43 @@
-import scipy.optimize as spo
 import numpy as np
+import scipy.optimize as spo
 
-from nsopt.utils import setup_pyx_import
 from nsopt.opt.shared import (
-    Optimizable, ProximalGradOptimizable, UnconstrainedOptimizable)
+    Optimizable,
+    ProximalGradOptimizable,
+    UnconstrainedOptimizable,
+)
+from nsopt.prob import (
+    MXHILB,
+    ChainedCB3I,
+    ChainedCB3II,
+    ChainedLQ,
+    DistanceGame,
+    LassoClassification,
+    LassoRegression,
+    MaxOfAbs,
+    MaxQ,
+)
 from nsopt.prob.utils import make_stable_rng
-from nsopt.prob import (LassoRegression, LassoClassification, MaxOfAbs,
-                        MaxQ, MXHILB, ChainedLQ, ChainedCB3I, ChainedCB3II,
-                        DistanceGame)
-with setup_pyx_import():
-    from nsopt.prob.kernels import sum_of_max_subd_mask, l1_reg_subd
+from nsopt.utils import setup_pyx_import
 
-import unittest
+with setup_pyx_import():
+    from nsopt.prob.kernels import l1_reg_subd, sum_of_max_subd_mask
+
 import itertools
+import unittest
 
 SIMPLE_PROBS = [MaxQ, MXHILB, ChainedLQ, ChainedCB3I, ChainedCB3II]
+
 
 class TestCaseWithRng(unittest.TestCase):
     def setUp(self):
         self.rng = make_stable_rng(type(self))
 
+
 class BatchEvalTest(TestCaseWithRng):
     def check(self, opt: Optimizable, batch_size=55):
         x0 = opt.x0
-        xb = x0[np.newaxis, :] + self.rng.standard_normal(
-            (batch_size, *x0.shape))
+        xb = x0[np.newaxis, :] + self.rng.standard_normal((batch_size, *x0.shape))
         xb[0] = x0
         fvals = []
         for i in range(batch_size):
@@ -37,11 +50,11 @@ class BatchEvalTest(TestCaseWithRng):
         np.testing.assert_allclose(fvals, fb)
 
     def test_lasso_regression(self):
-        lasso, _ = LassoRegression.gen_random(10, 20, .3, rng=self.rng)
+        lasso, _ = LassoRegression.gen_random(10, 20, 0.3, rng=self.rng)
         self.check(lasso)
 
     def test_lasso_classification(self):
-        lasso, xt = LassoClassification.gen_random(10, 20, 5, .3, rng=self.rng)
+        lasso, xt = LassoClassification.gen_random(10, 20, 5, 0.3, rng=self.rng)
         ce = lasso.prox_f(xt)
         self.assertGreater(ce, 0)
         self.assertLess(ce, 1)
@@ -70,8 +83,7 @@ class NumericalGradTest(TestCaseWithRng):
         grad_num = spo.approx_fprime(x, opt.prox_f)
         np.testing.assert_allclose(grad, grad_num, atol=1e-5, rtol=1e-5)
 
-    def check_numerical_subdiff(self, opt: Optimizable, x0, *,
-                                is_unconstrained=True):
+    def check_numerical_subdiff(self, opt: Optimizable, x0, *, is_unconstrained=True):
         _, subg = opt.eval(x0, need_grad=True)
         g0 = -subg.reduce_trafs(1e-9, 0, 1, {}).dx
         g1 = subg.take_arbitrary()
@@ -86,11 +98,11 @@ class NumericalGradTest(TestCaseWithRng):
         np.testing.assert_allclose(g1, gnum, atol=1e-5, rtol=1e-5)
 
     def test_lasso_regression(self):
-        lasso, _ = LassoRegression.gen_random(30, 20, .5, rng=self.rng)
+        lasso, _ = LassoRegression.gen_random(30, 20, 0.5, rng=self.rng)
         self.check_prox(lasso)
 
     def test_lasso_classification(self):
-        lasso, _ = LassoClassification.gen_random(30, 40, 5, .3, rng=self.rng)
+        lasso, _ = LassoClassification.gen_random(30, 40, 5, 0.3, rng=self.rng)
         self.check_prox(lasso)
 
     def test_max_of_abs(self):
@@ -115,7 +127,7 @@ class NumericalGradTest(TestCaseWithRng):
     def test_distance_game(self):
         for n in itertools.chain([5], range(95, 105)):
             g = DistanceGame.gen_random(n)
-            x0 = self.rng.uniform(size=n) + .05
+            x0 = self.rng.uniform(size=n) + 0.05
             x0 /= x0.sum()
             self.check_numerical_subdiff(g, x0, is_unconstrained=False)
 
@@ -143,8 +155,7 @@ class TestL1SubDiff(TestCaseWithRng):
             elif g_high[i] < 0:
                 gc_expect[i] = g_high[i]
 
-        gc_get = l1_reg_subd(
-            self.slack, self.lam, g0, x0, pen)
+        gc_get = l1_reg_subd(self.slack, self.lam, g0, x0, pen)
         np.testing.assert_allclose(gc_expect, gc_get)
 
     def test_l1_reg_subd(self):
@@ -162,13 +173,13 @@ class TestProbKernels(TestCaseWithRng):
         def compute(slack, comp):
             slack = float(slack)
             ncomp, ncol = comp.shape
-            cidx = np.argsort(-comp, axis=1)    # cidx is descending order
+            cidx = np.argsort(-comp, axis=1)  # cidx is descending order
             mask = 1 << cidx[:, 0]
 
             items = []
 
             def append_item(r, c):
-                c0, c1 = cidx[r, c:c + 2]
+                c0, c1 = cidx[r, c : c + 2]
                 items.append((comp[r, c0] - comp[r, c1], r, c + 1))
 
             for i in range(ncomp):
@@ -195,22 +206,22 @@ class TestProbKernels(TestCaseWithRng):
                 np.testing.assert_allclose(mask_get, mask_expect)
             return mask_get
 
-        run(1, [
-            [1, 2, 2.9],
-            [4, 5.1, 6],
-        ])
-        run(slack=100,
-            comp=[[-0.6,  0.1,  0.6],
-                  [ 0.2,  2.5, -2]])
+        run(
+            1,
+            [
+                [1, 2, 2.9],
+                [4, 5.1, 6],
+            ],
+        )
+        run(slack=100, comp=[[-0.6, 0.1, 0.6], [0.2, 2.5, -2]])
 
         for ncol in [2, 3]:
             mask_used = np.zeros(2**ncol, dtype=bool)
             for size in range(2, 100):
                 comp = self.rng.standard_normal((size, ncol))
-                slack = (comp.max() - comp.min()) * self.rng.uniform(.01, .8)
+                slack = (comp.max() - comp.min()) * self.rng.uniform(0.01, 0.8)
                 mask_used[run(slack, comp)] = True
-                t = run(comp.max(axis=1).sum() - comp.min(axis=1).sum() + 1e-7,
-                        comp)
+                t = run(comp.max(axis=1).sum() - comp.min(axis=1).sum() + 1e-7, comp)
                 np.testing.assert_allclose(t, 2**ncol - 1)
 
             expect_used = np.ones_like(mask_used)

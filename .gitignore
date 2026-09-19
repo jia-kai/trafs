@@ -1,4 +1,6 @@
-/venv
+/.venv
+/.julia-env
+/.julia-depot
 /build
 /bench-out*
 *.pyc

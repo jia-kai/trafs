@@ -1,35 +1,25 @@
-from .simplex import SimplexConstrainedOptimizable
-from .utils import make_stable_rng, SOCPSolverBase
-from ..opt.shared import TRAFSStep
-from ..utils import setup_pyx_import
-
-import attrs
 import math
+import typing
+from dataclasses import dataclass, field
+
 import numpy as np
 import numpy.typing as npt
 
-import typing
+from ..opt.shared import TRAFSStep
+from ..utils import setup_pyx_import
+from .simplex import SimplexConstrainedOptimizable
+from .utils import SOCPSolverBase, make_stable_rng
 
 with setup_pyx_import():
     from .kernels import distance_game_subd
 
 SIMPLEX_DIAMETER = np.sqrt(2) + 1e-4
 
-@attrs.frozen
+
+@dataclass(frozen=True, slots=True)
 class DistanceGame(SimplexConstrainedOptimizable):
     """an artificial zero-sum game where the cost is a_i^T x + || B_i x ||_2 +
     KL(x, p_i) where the opponent choses i"""
-
-    x0: npt.NDArray
-
-    m: int
-    """number of actions of the opponent"""
-
-    k: int
-    """projection dimension"""
-
-    n: int
-    """dimension of the decision variable"""
 
     A: npt.NDArray
     """(m, n) matrix"""
@@ -40,12 +30,23 @@ class DistanceGame(SimplexConstrainedOptimizable):
     P: npt.NDArray
     """(m, n) matrix"""
 
+    x0: npt.NDArray = field(init=False)
+
+    m: int = field(init=False)
+    """number of actions of the opponent"""
+
+    k: int = field(init=False)
+    """projection dimension"""
+
+    n: int = field(init=False)
+    """dimension of the decision variable"""
+
     kl_eps: float = 1e-8
     """epsilon for the KL divergence"""
 
     pgd_default_lr: float = 1e-4
 
-    @attrs.define
+    @dataclass(slots=True)
     class SubDiff(SimplexConstrainedOptimizable.SubDiff):
         fval: float
         x: npt.NDArray
@@ -62,8 +63,9 @@ class DistanceGame(SimplexConstrainedOptimizable):
         _prev_cvx_hull: typing.Any = None
         _prev_trafs_step: typing.Any = None
 
-        def _get_convex_hull(self, slack: float) -> tuple[
-                npt.NDArray, tuple[npt.NDArray, npt.NDArray]]:
+        def _get_convex_hull(
+            self, slack: float
+        ) -> tuple[npt.NDArray, tuple[npt.NDArray, npt.NDArray]]:
             """compute the convex hull of the subdifferential
 
             :return: (g0, (g1, h1)): the subdifferential is
@@ -77,14 +79,12 @@ class DistanceGame(SimplexConstrainedOptimizable):
             sub_slack = slack - delta
             act_mask = sub_slack >= 0
             x = self.x
-            g_kl = (
-                np.log(x + self.kl_eps) + x / (x + self.kl_eps))[np.newaxis]
+            g_kl = (np.log(x + self.kl_eps) + x / (x + self.kl_eps))[np.newaxis]
             g_kl = g_kl - np.log(self.P[act_mask] + self.kl_eps)
 
             B = self.B[act_mask]
             BtBx = np.squeeze(
-                np.transpose(B, (0, 2, 1)) @ self.Bx[act_mask][:, :, np.newaxis],
-                axis=2
+                np.transpose(B, (0, 2, 1)) @ self.Bx[act_mask][:, :, np.newaxis], axis=2
             )
             return distance_game_subd(
                 comp_slack=sub_slack[act_mask],
@@ -93,7 +93,7 @@ class DistanceGame(SimplexConstrainedOptimizable):
                 Ax=self.Ax[act_mask],
                 B=B,
                 BtBx=BtBx,
-                Bx_norm=self.Bnorm[act_mask]
+                Bx_norm=self.Bnorm[act_mask],
             )
 
         def take_arbitrary(self):
@@ -102,29 +102,33 @@ class DistanceGame(SimplexConstrainedOptimizable):
             return g0[0]
 
         def reduce_trafs(
-                self,
-                subg_slack: float, df_lb_thresh: float, norm_bound: float,
-                state: dict) -> TRAFSStep:
+            self, subg_slack: float, df_lb_thresh: float, norm_bound: float, state: dict
+        ) -> TRAFSStep:
 
             cvx_hull = self._get_convex_hull(subg_slack)
             arg = (df_lb_thresh, norm_bound)
             pch = self._prev_cvx_hull
+
             def eq(x, y):
                 return x.shape == y.shape and np.all(x == y)
-            if (arg == self._prev_trafs_arg and
-                    (eq(cvx_hull[0], pch[0]) and
-                     eq(cvx_hull[1][0], pch[1][0]) and
-                     eq(cvx_hull[1][1], pch[1][1]))):
+
+            if arg == self._prev_trafs_arg and (
+                eq(cvx_hull[0], pch[0])
+                and eq(cvx_hull[1][0], pch[1][0])
+                and eq(cvx_hull[1][1], pch[1][1])
+            ):
                 return self._prev_trafs_step
 
             self._prev_cvx_hull = cvx_hull
             self._prev_trafs_arg = arg
             self._prev_trafs_step = self._do_reduce_trafs(
-                cvx_hull, df_lb_thresh, norm_bound)
+                cvx_hull, df_lb_thresh, norm_bound
+            )
             return self._prev_trafs_step
 
-        def _do_reduce_trafs(self,
-                cvx_hull, df_lb_thresh: float, norm_bound: float) -> TRAFSStep:
+        def _do_reduce_trafs(
+            self, cvx_hull, df_lb_thresh: float, norm_bound: float
+        ) -> TRAFSStep:
 
             sol = self._solve_trafs(cvx_hull, norm_bound)
 
@@ -153,8 +157,7 @@ class DistanceGame(SimplexConstrainedOptimizable):
                 dx_dg = max(dx_dg, (g0 @ dx).max())
             if g1.shape[0]:
                 dx_dg = max(
-                    dx_dg,
-                    (g1 @ dx + np.linalg.norm(h1 @ dx, axis=1, ord=2)).max()
+                    dx_dg, (g1 @ dx + np.linalg.norm(h1 @ dx, axis=1, ord=2)).max()
                 )
 
             if sol.is_optimal:
@@ -180,11 +183,13 @@ class DistanceGame(SimplexConstrainedOptimizable):
                 x_high = np.minimum(x_high / norm_bound, 1)
                 solver.add_x_norm_bound()
 
-            (solver
-             .add_x_lower(x_low)
-             .add_x_higher(x_high)
-             .add_eq(np.ones((1, dim), dtype=np.float64),
-                     np.zeros(1, dtype=np.float64)))
+            (
+                solver.add_x_lower(x_low)
+                .add_x_higher(x_high)
+                .add_eq(
+                    np.ones((1, dim), dtype=np.float64), np.zeros(1, dtype=np.float64)
+                )
+            )
 
             g0, (g1, h1) = cvx_hull
             socp_pdim = h1.shape[1]
@@ -206,16 +211,19 @@ class DistanceGame(SimplexConstrainedOptimizable):
             assert (ret.x + self.x).min() >= -1e-7, (ret.x + self.x).min()
             return ret
 
-    def __init__(self, A: npt.NDArray, B: npt.NDArray, P: npt.NDArray):
-        assert A.ndim == 2
-        assert B.ndim == 3
-        assert P.ndim == 2
-        m, k, n = B.shape
-        assert A.shape == (m, n)
-        assert P.shape == (m, n)
+    def __post_init__(self) -> None:
+        assert self.A.ndim == 2
+        assert self.B.ndim == 3
+        assert self.P.ndim == 2
+        m, k, n = self.B.shape
+        assert self.A.shape == (m, n)
+        assert self.P.shape == (m, n)
         x0 = np.empty(n)
         x0.fill(1 / n)
-        self.__attrs_init__(x0=x0, m=m, k=k, n=n, A=A, B=B, P=P)
+        object.__setattr__(self, "x0", x0)
+        object.__setattr__(self, "m", m)
+        object.__setattr__(self, "k", k)
+        object.__setattr__(self, "n", n)
 
     @classmethod
     def _get_kl(cls, x: npt.NDArray, P: npt.NDArray, eps: float) -> npt.NDArray:
@@ -223,7 +231,19 @@ class DistanceGame(SimplexConstrainedOptimizable):
         kl1 = np.sum(x[np.newaxis, :] * np.log(P + eps), axis=1)
         return kl0 - kl1
 
-    def eval(self, x: npt.NDArray, *, need_grad=False):
+    @typing.overload
+    def eval(
+        self, x: npt.NDArray, *, need_grad: typing.Literal[False] = False
+    ) -> float: ...
+
+    @typing.overload
+    def eval(
+        self, x: npt.NDArray, *, need_grad: typing.Literal[True]
+    ) -> tuple[float, SubDiff]: ...
+
+    def eval(
+        self, x: npt.NDArray, *, need_grad: bool = False
+    ) -> float | tuple[float, SubDiff]:
         assert x.ndim == 1
         assert x.shape[0] == self.n
         x = np.maximum(x, 0)
@@ -239,9 +259,17 @@ class DistanceGame(SimplexConstrainedOptimizable):
         fval = comp.max()
         if need_grad:
             sub_diff = self.SubDiff(
-                fval=fval, x=x, A=self.A,
-                Ax=Ax, B=self.B, Bx=Bx, Bnorm=Bnorm,
-                P=self.P, comp=comp, kl_eps=self.kl_eps)
+                fval=fval,
+                x=x,
+                A=self.A,
+                Ax=Ax,
+                B=self.B,
+                Bx=Bx,
+                Bnorm=Bnorm,
+                P=self.P,
+                comp=comp,
+                kl_eps=self.kl_eps,
+            )
             return fval, sub_diff
         return fval
 
@@ -249,13 +277,12 @@ class DistanceGame(SimplexConstrainedOptimizable):
         assert x.ndim == 2 and x.shape[1] == self.n
         x = np.maximum(x, 0)
 
-        Ax = x @ self.A.T   # (batch, m)
-        Bxl2 = np.linalg.norm(self.B @ x.T, axis=1, ord=2).T     # (batch, m)
-        kl_1 = np.sum(x * np.log(x + self.kl_eps), axis=1,
-                      keepdims=True)        # (batch, 1)
-        kl_2 = np.sum(x[:, np.newaxis, :] *
-                      np.log(self.P[np.newaxis] + self.kl_eps),
-                      axis=2)               # (batch, m)
+        Ax = x @ self.A.T  # (batch, m)
+        Bxl2 = np.linalg.norm(self.B @ x.T, axis=1, ord=2).T  # (batch, m)
+        kl_1 = np.sum(x * np.log(x + self.kl_eps), axis=1, keepdims=True)  # (batch, 1)
+        kl_2 = np.sum(
+            x[:, np.newaxis, :] * np.log(self.P[np.newaxis] + self.kl_eps), axis=2
+        )  # (batch, m)
         kl = kl_1 - kl_2
         comp = np.abs(Ax)
         comp += Bxl2
@@ -263,14 +290,16 @@ class DistanceGame(SimplexConstrainedOptimizable):
         return comp.max(axis=1)
 
     def __repr__(self):
-        return f'DistanceGame(n={self.n}, m={self.m}, k={self.k})'
+        return f"DistanceGame(n={self.n}, m={self.m}, k={self.k})"
 
     @classmethod
-    def gen_random(cls, n: int,
-                   m: typing.Optional[int]=None,
-                   k: typing.Optional[int]=None,
-                   rng: typing.Optional[np.random.Generator] = None
-                   ) -> "DistanceGame":
+    def gen_random(
+        cls,
+        n: int,
+        m: int | None = None,
+        k: int | None = None,
+        rng: np.random.Generator | None = None,
+    ) -> DistanceGame:
         if rng is None:
             rng = make_stable_rng(cls)
 
@@ -291,7 +320,9 @@ class DistanceGame(SimplexConstrainedOptimizable):
         x0 = np.empty(n)
         x0.fill(1 / n)
 
-        stat = lambda x: np.median(np.abs(x))
+        def stat(x):
+            return np.median(np.abs(x))
+
         # scale A and B so they have comparable magnitudes as KL
         kl = stat(cls._get_kl(x0, P, 1e-8))
         A *= kl / stat(A @ x0)
@@ -312,8 +343,8 @@ class DistanceGame(SimplexConstrainedOptimizable):
             assert k == (n + 3) // 4 + 1
             m = sum(math.comb(n - 1, i) for i in range(k))
             p = 1 - m / (2 ** (n - 1))
-            print(f'{k=} {n=}: p(B_i contains origin) = {p}')
+            print(f"{k=} {n=}: p(B_i contains origin) = {p}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     DistanceGame.print_info()

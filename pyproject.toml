@@ -1,0 +1,54 @@
+[project]
+name = "trafs"
+version = "0.1.0"
+description = "Implementation and benchmark suite for the TRAFS paper"
+readme = "README.md"
+authors = [
+    { name = "Kai Jia", email = "jia.kai66@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "clarabel>=0.11.1",
+    "cython>=3.3.0",
+    "julia>=0.6.2",
+    "matplotlib>=3.11.2",
+    "mosek>=11.2.4",
+    "numpy>=2.5.3",
+    "scipy>=1.18.1",
+    "setuptools>=82.0.0",
+    "piqptr"
+]
+
+[tool.uv.sources]
+piqptr = { path = "third-party/piqp", editable = true }
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.412",
+    "pytest>=9.0.2",
+    "ruff>=0.16.8",
+]
+
+[tool.pytest.ini_options]
+python_files = ["test.py"]
+testpaths = ["test.py"]
+
+[tool.ruff]
+target-version = "py314"
+exclude = ["build", "third-party"]
+
+[tool.ruff.lint]
+select = ["B", "E4", "E7", "E9", "F", "I", "RUF", "SIM", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"nsopt/opt/trafs.py" = ["E402"]
+"nsopt/prob/*.py" = ["E402"]
+"run_*.py" = ["E402"]
+"test.py" = ["E402"]
+
+[tool.pyright]
+include = ["nsopt"]
+pythonVersion = "3.14"
+typeCheckingMode = "standard"
+stubPath = "typings"
+reportMissingModuleSource = "none" # Cython modules have adjacent stubs.

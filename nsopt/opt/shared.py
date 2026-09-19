@@ -1,11 +1,12 @@
-import attrs
+import typing
+from abc import ABCMeta, abstractmethod
+from dataclasses import dataclass, field
+
 import numpy as np
 import numpy.typing as npt
 
-import typing
-from abc import ABCMeta, abstractmethod
 
-@attrs.frozen
+@dataclass(frozen=True, slots=True)
 class LipschitzConstants:
     """Lipschitz constants (and other related information) of a convex
     function"""
@@ -26,7 +27,7 @@ class LipschitzConstants:
     """weak smoothness"""
 
 
-@attrs.frozen
+@dataclass(frozen=True, slots=True)
 class OptimizationResult:
     """final optimization result"""
 
@@ -40,14 +41,14 @@ class OptimizationResult:
     fval: float
     """the final objective value"""
 
-    fval_hist: npt.NDArray = attrs.field(
-        default=np.array([], dtype=np.float64),
-        repr=False)
+    fval_hist: npt.NDArray = field(
+        default_factory=lambda: np.array([], dtype=np.float64), repr=False
+    )
     """history of function values"""
 
-    iter_times: npt.NDArray = attrs.field(
-        default=np.array([], dtype=np.float64),
-        repr=False)
+    iter_times: npt.NDArray = field(
+        default_factory=lambda: np.array([], dtype=np.float64), repr=False
+    )
     """finish time of each iteration (relative to start time)"""
 
     iters: int = 0
@@ -61,7 +62,7 @@ class OptimizationResult:
     """total running time"""
 
 
-@attrs.define(slots=True)
+@dataclass(slots=True)
 class TRAFSStep:
     """a step of the TRAFS method
     Note: ``dx_dg <= 0`` should always hold. If ``dx_dg == 0`` but
@@ -84,7 +85,7 @@ class TRAFSStep:
     """
 
     @classmethod
-    def make_zero(cls, dim: int, df_lb_is_global: bool) -> "TRAFSStep":
+    def make_zero(cls, dim: int, df_lb_is_global: bool) -> TRAFSStep:
         return cls(np.zeros(dim, dtype=np.float64), 0, 0, df_lb_is_global)
 
 
@@ -106,9 +107,8 @@ class Optimizable(metaclass=ABCMeta):
 
         @abstractmethod
         def reduce_trafs(
-                self,
-                subg_slack: float, df_lb_thresh: float, norm_bound: float,
-                state: dict) -> TRAFSStep:
+            self, subg_slack: float, df_lb_thresh: float, norm_bound: float, state: dict
+        ) -> TRAFSStep:
             """reduce the subdifferential to a step vector per the TRAFS method
 
             :param subg_slack: the functional subgradient bound (i.e., function
@@ -136,13 +136,15 @@ class Optimizable(metaclass=ABCMeta):
 
     @typing.overload
     @abstractmethod
-    def eval(self, x: npt.NDArray, *, need_grad: typing.Literal[True]) -> tuple[
-            float, SubDiff]:
+    def eval(
+        self, x: npt.NDArray, *, need_grad: typing.Literal[True]
+    ) -> tuple[float, SubDiff]:
         pass
 
     @abstractmethod
-    def eval(self, x: npt.NDArray, *, need_grad: bool=False) -> typing.Union[
-            float, tuple[float, SubDiff]]:
+    def eval(
+        self, x: npt.NDArray, *, need_grad: bool = False
+    ) -> float | tuple[float, SubDiff]:
         """function value at a single point
         :param x: (n, ) ndarray
         """
@@ -157,7 +159,7 @@ class Optimizable(metaclass=ABCMeta):
     def proj(self, x: npt.NDArray) -> npt.NDArray:
         """projection onto the feasible set"""
 
-    def get_optimal_value(self) -> typing.Optional[float]:
+    def get_optimal_value(self) -> float | None:
         """get the optimal value if available"""
         return None
 
@@ -186,21 +188,23 @@ class ProximalGradOptimizable(UnconstrainedOptimizable):
 
     Note that we have assumed that the problem is unconstrained.
     """
+
     @typing.overload
     @abstractmethod
-    def prox_f(self, x: npt.NDArray, *,
-               need_grad: typing.Literal[False]) -> float:
+    def prox_f(self, x: npt.NDArray, *, need_grad: typing.Literal[False]) -> float:
         pass
 
     @typing.overload
     @abstractmethod
-    def prox_f(self, x: npt.NDArray, *,
-               need_grad: typing.Literal[True]) -> tuple[float, npt.NDArray]:
+    def prox_f(
+        self, x: npt.NDArray, *, need_grad: typing.Literal[True]
+    ) -> tuple[float, npt.NDArray]:
         pass
 
     @abstractmethod
-    def prox_f(self, x: npt.NDArray, *, need_grad: bool=False) -> typing.Union[
-            float, tuple[float, npt.NDArray]]:
+    def prox_f(
+        self, x: npt.NDArray, *, need_grad: bool = False
+    ) -> float | tuple[float, npt.NDArray]:
         """evaluate f(x) and grad of f at x
 
         :param x: (n, ) ndarray
@@ -212,6 +216,7 @@ class ProximalGradOptimizable(UnconstrainedOptimizable):
 
         :param x: (batch_size, n) ndarray
         """
+
     @abstractmethod
     def prox_g(self, x: npt.NDArray) -> float:
         """evaluate g(x)

@@ -1,19 +1,20 @@
-from .shared import OptimizationResult, Optimizable, KnownLipschitzOptimizable
-from ..utils import CPUTimer
+from dataclasses import dataclass
 
-import attrs
 import numpy as np
 
-import typing
+from ..utils import CPUTimer
+from .shared import KnownLipschitzOptimizable, Optimizable, OptimizationResult
 
-@attrs.define(kw_only=True)
+
+@dataclass(slots=True, kw_only=True)
 class GradDescentSolver:
     """projected subgradient descent"""
+
     PROBLEM_CLASS = Optimizable
 
     max_iters: int
 
-    lr_mul: typing.Optional[float] = None
+    lr_mul: float | None = None
     """learning rate multiplier; the schedule is lr_mul / sqrt(t + 1)"""
 
     verbose: bool = False
@@ -25,6 +26,7 @@ class GradDescentSolver:
         xk = obj.x0.copy()
 
         best_fval = np.inf
+        best_xk = xk.copy()
 
         avg_x = xk.copy()
 
@@ -51,14 +53,11 @@ class GradDescentSolver:
 
             if self.verbose:
                 avg_fval = obj.eval(avg_x)
-                print(f'{i}: {fval=:.3g} {avg_fval=:.3g}')
+                print(f"{i}: {fval=:.3g} {avg_fval=:.3g}")
 
             iter_times.append(timer.elapsed())
 
-        if obj.eval(avg_x) < best_fval:
-            xk = avg_x
-        else:
-            xk = best_xk
+        xk = avg_x if obj.eval(avg_x) < best_fval else best_xk
         return OptimizationResult(
             optimal=False,
             x=xk,

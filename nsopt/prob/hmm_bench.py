@@ -1,26 +1,33 @@
 """benchmark problems from [1]
 
 [1] Haarala, M. and Miettinen, K. and Maekelae, M. M., New limited memory
-bundle method for large-scale nonsmooth optimization. """
+bundle method for large-scale nonsmooth optimization."""
 
-from ..opt.shared import UnconstrainedOptimizable, LipschitzConstants, TRAFSStep
-from .utils import UnconstrainedFuncSubDiffHelper, mosek, print_once
-from ..utils import setup_pyx_import
+import typing
+from dataclasses import dataclass
 
 import numpy as np
 import numpy.typing as npt
-import attrs
-import typing
+
+from ..opt.shared import LipschitzConstants, TRAFSStep, UnconstrainedOptimizable
+from ..utils import setup_pyx_import
+from .utils import UnconstrainedFuncSubDiffHelper, mosek, print_once
 
 with setup_pyx_import():
     from .kernels import (
-        mxhilb_comp_batch, mxhilb_subd, chained_lq_subd, chained_cb3_I_subd)
+        chained_cb3_I_subd,
+        chained_lq_subd,
+        mxhilb_comp_batch,
+        mxhilb_subd,
+    )
+
 
 class MaxQ(UnconstrainedOptimizable):
     """max x_i^2"""
+
     x0: npt.NDArray
 
-    @attrs.frozen
+    @dataclass(frozen=True, slots=True)
     class SubDiff(UnconstrainedOptimizable.SubDiff):
         _helper = UnconstrainedFuncSubDiffHelper()
 
@@ -34,9 +41,8 @@ class MaxQ(UnconstrainedOptimizable):
             return ret
 
         def reduce_trafs(
-                self,
-                subg_slack: float, df_lb_thresh: float, norm_bound: float,
-                state: dict) -> TRAFSStep:
+            self, subg_slack: float, df_lb_thresh: float, norm_bound: float, state: dict
+        ) -> TRAFSStep:
 
             act_mask = (self.fval - self.comp) <= subg_slack
             act_idx = np.flatnonzero(act_mask)
@@ -48,16 +54,30 @@ class MaxQ(UnconstrainedOptimizable):
             gc = np.zeros_like(self.x)
             gc[act_idx] = (a * a2r) / a2r.sum()
             return self._helper.reduce_with_min_grad(
-                gc, df_lb_thresh, norm_bound,
-                dx_dg_fn=lambda dx: (a * dx[act_idx]).max()
+                gc,
+                df_lb_thresh,
+                norm_bound,
+                dx_dg_fn=lambda dx: (a * dx[act_idx]).max(),
             )
 
     def __init__(self, n: int):
         x0 = np.arange(1, n + 1, dtype=np.float64)
-        x0[n // 2:] *= -1
+        x0[n // 2 :] *= -1
         self.x0 = x0
 
-    def eval(self, x: npt.NDArray, *, need_grad=False):
+    @typing.overload
+    def eval(
+        self, x: npt.NDArray, *, need_grad: typing.Literal[False] = False
+    ) -> float: ...
+
+    @typing.overload
+    def eval(
+        self, x: npt.NDArray, *, need_grad: typing.Literal[True]
+    ) -> tuple[float, SubDiff]: ...
+
+    def eval(
+        self, x: npt.NDArray, *, need_grad: bool = False
+    ) -> float | tuple[float, SubDiff]:
         assert x.ndim == 1
         assert x.size >= 1
         comp = np.square(x)
@@ -74,14 +94,15 @@ class MaxQ(UnconstrainedOptimizable):
         return 0.0
 
     def __repr__(self):
-        return f'MaxQ(n={self.x0.size})'
+        return f"MaxQ(n={self.x0.size})"
 
 
 class MXHILB(UnconstrainedOptimizable):
     """max |c_i| where c = Mx, M is the Hilbert matrix"""
+
     x0: npt.NDArray
 
-    @attrs.frozen
+    @dataclass(frozen=True, slots=True)
     class SubDiff(UnconstrainedOptimizable.SubDiff):
         _helper = UnconstrainedFuncSubDiffHelper()
 
@@ -92,41 +113,53 @@ class MXHILB(UnconstrainedOptimizable):
         def take_arbitrary(self):
             G = mxhilb_subd(1e-9, self.fval, self.recips, self.comp)
             if G is None:
-                return TRAFSStep.make_zero(self.comp.size, True)
+                return np.zeros(self.comp.size, dtype=np.float64)
             return np.mean(G, axis=1)
 
         def reduce_trafs(
-                self,
-                subg_slack: float, df_lb_thresh: float, norm_bound: float,
-                state: dict) -> TRAFSStep:
+            self, subg_slack: float, df_lb_thresh: float, norm_bound: float, state: dict
+        ) -> TRAFSStep:
             G = mxhilb_subd(subg_slack, self.fval, self.recips, self.comp)
             if G is None:
                 return TRAFSStep.make_zero(self.comp.size, True)
 
             if G.shape[1] == 1:
                 return self._helper.reduce_with_min_grad(
-                    G[:, 0], df_lb_thresh, norm_bound)
+                    G[:, 0], df_lb_thresh, norm_bound
+                )
 
             # MOSEK is faster than PIQP
             # PIQP faster than Clarabel
             if mosek is None or self._helper.cvx_hull_prefer_qp:
-                print_once('Use PIQP to solve min norm grad')
+                print_once("Use PIQP to solve min norm grad")
                 return self._helper.reduce_from_cvx_hull_qp(
-                    G, df_lb_thresh, norm_bound, state)
-            print_once('Use MOSEK to solve best dx')
+                    G, df_lb_thresh, norm_bound, state
+                )
+            print_once("Use MOSEK to solve best dx")
             return self._helper.reduce_from_cvx_hull_socp(
-                G, df_lb_thresh, norm_bound, state)
-
+                G, df_lb_thresh, norm_bound, state
+            )
 
     def __init__(self, n: int):
         self.x0 = np.ones(n, dtype=np.float64)
         self._recips = np.reciprocal(np.arange(1, n * 2, dtype=np.float64))
 
-    def eval(self, x: npt.NDArray, *, need_grad=False):
+    @typing.overload
+    def eval(
+        self, x: npt.NDArray, *, need_grad: typing.Literal[False] = False
+    ) -> float: ...
+
+    @typing.overload
+    def eval(
+        self, x: npt.NDArray, *, need_grad: typing.Literal[True]
+    ) -> tuple[float, SubDiff]: ...
+
+    def eval(
+        self, x: npt.NDArray, *, need_grad: bool = False
+    ) -> float | tuple[float, SubDiff]:
         assert x.ndim == 1
         assert x.size >= 1
-        comp = np.squeeze(mxhilb_comp_batch(self._recips, x[np.newaxis, :]),
-                          axis=1)
+        comp = np.squeeze(mxhilb_comp_batch(self._recips, x[np.newaxis, :]), axis=1)
         fval = np.abs(comp).max()
         if need_grad:
             return fval, self.SubDiff(fval, self._recips, comp)
@@ -140,24 +173,26 @@ class MXHILB(UnconstrainedOptimizable):
     def eval_cvx_params(self) -> LipschitzConstants:
         n = self.x0.size
         return LipschitzConstants(
-            D=self.eval(self.x0),
+            D=typing.cast(float, self.eval(self.x0)),
             R=np.sqrt(n),
             L=np.linalg.norm(self._recips[:n], ord=2),
             alpha=0,
-            beta=0)
+            beta=0,
+        )
 
     def get_optimal_value(self):
         return 0.0
 
     def __repr__(self):
-        return f'MXHILB(n={self.x0.size})'
+        return f"MXHILB(n={self.x0.size})"
 
 
 class ChainedLQ(UnconstrainedOptimizable):
     """max (-x_i - x_{i+1}, -x_i - x_{i+1} + x_i^2 + x_{i+1}^2 - 1)"""
+
     x0: npt.NDArray
 
-    @attrs.frozen
+    @dataclass(frozen=True, slots=True)
     class SubDiff(UnconstrainedOptimizable.SubDiff):
         _helper = UnconstrainedFuncSubDiffHelper()
 
@@ -177,23 +212,36 @@ class ChainedLQ(UnconstrainedOptimizable):
             return ret
 
         def reduce_trafs(
-                self,
-                subg_slack: float, df_lb_thresh: float, norm_bound: float,
-                state: dict) -> TRAFSStep:
+            self, subg_slack: float, df_lb_thresh: float, norm_bound: float, state: dict
+        ) -> TRAFSStep:
 
             desc = chained_lq_subd(subg_slack, self.x, self.comp)
 
             # clarabel performs better on sparse problems
             return self._helper.reduce_from_multi_cvx_hull_socp(
-                desc, df_lb_thresh, norm_bound, state,
+                desc,
+                df_lb_thresh,
+                norm_bound,
+                state,
                 force_clarabel=True,
             )
-
 
     def __init__(self, n: int):
         self.x0 = np.full(n, -0.5, dtype=np.float64)
 
-    def eval(self, x: npt.NDArray, *, need_grad=False):
+    @typing.overload
+    def eval(
+        self, x: npt.NDArray, *, need_grad: typing.Literal[False] = False
+    ) -> float: ...
+
+    @typing.overload
+    def eval(
+        self, x: npt.NDArray, *, need_grad: typing.Literal[True]
+    ) -> tuple[float, SubDiff]: ...
+
+    def eval(
+        self, x: npt.NDArray, *, need_grad: bool = False
+    ) -> float | tuple[float, SubDiff]:
         x2 = np.square(x)
         c0 = -x[:-1] - x[1:]
         c1 = c0 + x2[:-1] + x2[1:] - 1
@@ -207,25 +255,25 @@ class ChainedLQ(UnconstrainedOptimizable):
     def eval_batch(self, x: npt.NDArray):
         x2 = np.square(x)
         comp = x2[:, :-1] + x2[:, 1:] - 1
-        fval = (-x.sum(axis=1) * 2 + x[:, 0] + x[:, -1] +
-                np.maximum(comp, 0).sum(axis=1))
+        fval = -x.sum(axis=1) * 2 + x[:, 0] + x[:, -1] + np.maximum(comp, 0).sum(axis=1)
         return fval
 
     def get_optimal_value(self):
         return -np.sqrt(2) * (self.x0.size - 1)
 
     def __repr__(self):
-        return f'ChainedLQ(n={self.x0.size})'
+        return f"ChainedLQ(n={self.x0.size})"
 
 
 class ChainedCB3I(UnconstrainedOptimizable):
     """max(x_i^4 + x_{i+1}^2, (2-x_i)^2 + (2-x_{i+1})^2,
-        2e^{-x_i + x_{i+1}})"""
+    2e^{-x_i + x_{i+1}})"""
+
     x0: npt.NDArray
 
     pgd_default_lr = 1e-2
 
-    @attrs.frozen
+    @dataclass(frozen=True, slots=True)
     class SubDiff(UnconstrainedOptimizable.SubDiff):
         _helper = UnconstrainedFuncSubDiffHelper()
 
@@ -254,20 +302,34 @@ class ChainedCB3I(UnconstrainedOptimizable):
             return grad
 
         def reduce_trafs(
-                self,
-                subg_slack: float, df_lb_thresh: float, norm_bound: float,
-                state: dict) -> TRAFSStep:
+            self, subg_slack: float, df_lb_thresh: float, norm_bound: float, state: dict
+        ) -> TRAFSStep:
             desc = chained_cb3_I_subd(subg_slack, self.x, self.comp)
 
             return self._helper.reduce_from_multi_cvx_hull_socp(
-                desc, df_lb_thresh, norm_bound, state,
+                desc,
+                df_lb_thresh,
+                norm_bound,
+                state,
                 force_clarabel=True,
             )
 
     def __init__(self, n: int):
         self.x0 = np.full(n, 2, dtype=np.float64)
 
-    def eval(self, x: npt.NDArray, *, need_grad=False):
+    @typing.overload
+    def eval(
+        self, x: npt.NDArray, *, need_grad: typing.Literal[False] = False
+    ) -> float: ...
+
+    @typing.overload
+    def eval(
+        self, x: npt.NDArray, *, need_grad: typing.Literal[True]
+    ) -> tuple[float, SubDiff]: ...
+
+    def eval(
+        self, x: npt.NDArray, *, need_grad: bool = False
+    ) -> float | tuple[float, SubDiff]:
         xi = x[:-1]
         xi1 = x[1:]
         c0 = np.power(xi, 4) + np.square(xi1)
@@ -293,17 +355,18 @@ class ChainedCB3I(UnconstrainedOptimizable):
         return 2 * (self.x0.size - 1)
 
     def __repr__(self):
-        return f'ChainedCB3I(n={self.x0.size})'
+        return f"ChainedCB3I(n={self.x0.size})"
 
 
 class ChainedCB3II(UnconstrainedOptimizable):
     """max sum(x_i^4 + x_{i+1}^2, (2-x_i)^2 + (2-x_{i+1})^2,
-        2e^{-x_i + x_{i+1}})"""
+    2e^{-x_i + x_{i+1}})"""
+
     x0: npt.NDArray
 
     pgd_default_lr = 1e-2
 
-    @attrs.frozen
+    @dataclass(frozen=True, slots=True)
     class SubDiff(UnconstrainedOptimizable.SubDiff):
         _helper = UnconstrainedFuncSubDiffHelper()
 
@@ -317,9 +380,8 @@ class ChainedCB3II(UnconstrainedOptimizable):
             return self.grads_fn[np.argmax(self.comp)]()
 
         def reduce_trafs(
-                self,
-                subg_slack: float, df_lb_thresh: float, norm_bound: float,
-                state: dict) -> TRAFSStep:
+            self, subg_slack: float, df_lb_thresh: float, norm_bound: float, state: dict
+        ) -> TRAFSStep:
             comp = self.comp
             grads_fn = self.grads_fn
             fval = comp.max()
@@ -330,18 +392,32 @@ class ChainedCB3II(UnconstrainedOptimizable):
                     G.append(grads_fn[i]())
 
             if len(G) == 1:
-                return self._helper.reduce_with_min_grad(
-                    G[0], df_lb_thresh, norm_bound)
+                return self._helper.reduce_with_min_grad(G[0], df_lb_thresh, norm_bound)
 
             G = np.stack(G, axis=1)
             return self._helper.reduce_from_cvx_hull_qp(
-                G, df_lb_thresh, norm_bound, state,
+                G,
+                df_lb_thresh,
+                norm_bound,
+                state,
             )
 
     def __init__(self, n: int):
         self.x0 = np.full(n, 2, dtype=np.float64)
 
-    def eval(self, x: npt.NDArray, *, need_grad=False):
+    @typing.overload
+    def eval(
+        self, x: npt.NDArray, *, need_grad: typing.Literal[False] = False
+    ) -> float: ...
+
+    @typing.overload
+    def eval(
+        self, x: npt.NDArray, *, need_grad: typing.Literal[True]
+    ) -> tuple[float, SubDiff]: ...
+
+    def eval(
+        self, x: npt.NDArray, *, need_grad: bool = False
+    ) -> float | tuple[float, SubDiff]:
         xi = x[:-1]
         xi1 = x[1:]
         c0 = np.power(xi, 4) + np.square(xi1)
@@ -355,11 +431,13 @@ class ChainedCB3II(UnconstrainedOptimizable):
             g[:-1] += 4 * np.power(xi, 3)
             g[1:] += 2 * xi1
             return g
+
         def g1():
             g = np.zeros_like(x)
             g[:-1] -= 4 - 2 * xi
             g[1:] -= 4 - 2 * xi1
             return g
+
         def g2():
             g = np.zeros_like(x)
             g[:-1] -= c2
@@ -384,4 +462,4 @@ class ChainedCB3II(UnconstrainedOptimizable):
         return 2 * (self.x0.size - 1)
 
     def __repr__(self):
-        return f'ChainedCB3II(n={self.x0.size})'
+        return f"ChainedCB3II(n={self.x0.size})"

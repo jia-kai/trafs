@@ -1,9 +1,10 @@
-from ..opt.shared import Optimizable
-
 import numpy as np
 import numpy.typing as npt
 
-def projection_simplex(v: npt.NDArray, z: float=1) -> npt.NDArray:
+from ..opt.shared import Optimizable
+
+
+def projection_simplex(v: npt.NDArray, z: float = 1) -> npt.NDArray:
     """projection of v onto the simplex"""
     # see https://gist.github.com/mblondel/6f3b7aaad90606b98f71
     # see also https://arxiv.org/pdf/1309.1541.pdf
@@ -19,6 +20,7 @@ def projection_simplex(v: npt.NDArray, z: float=1) -> npt.NDArray:
     w = v - lam
     w = np.maximum(w, 0, out=w)
     return w
+
 
 class SimplexConstrainedOptimizable(Optimizable):
     def proj(self, x: npt.NDArray) -> npt.NDArray:

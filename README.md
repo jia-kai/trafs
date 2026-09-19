@@ -9,10 +9,11 @@ our [paper](https://arxiv.org/abs/2311.06205) for more details.
 
 The program has only been tested on Linux.
 
-Make sure there is a recent C++ compiler, and `gfortran` is available. Install
-julia to the system. Setup a python virtual env. In the virtual env, run `pip
-install scipy numpy attrs clarabel mosek cython julia`. Then use
-`./setup-deps.sh` to compile and install other dependencies.
+
+First run `git submodule update --init --recursive` to initialize the
+submodules. Make sure there is a recent C++ compiler, and `gfortran` is
+available. Install julia to the system. Run `uv sync` to setup the python env.
+Use `./setup-deps.sh` to compile and install julia dependencies.
 
 ## Usage
 

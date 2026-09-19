@@ -1,24 +1,28 @@
-from ..opt.shared import (
-    ProximalGradOptimizable, KnownLipschitzOptimizable, LipschitzConstants)
-from .utils import make_stable_rng, UnconstrainedFuncSubDiffHelper
-from ..utils import setup_pyx_import
+from dataclasses import dataclass
+from typing import Literal, cast, overload
 
-import attr
 import numpy as np
 import numpy.typing as npt
 import scipy.special as sps
 
-import typing
+from ..opt.shared import (
+    KnownLipschitzOptimizable,
+    LipschitzConstants,
+    ProximalGradOptimizable,
+)
+from ..utils import setup_pyx_import
+from .utils import UnconstrainedFuncSubDiffHelper, make_stable_rng
 
 with setup_pyx_import():
     from .kernels import l1_reg_subd
+
 
 class L1RegularizedOptimizable(ProximalGradOptimizable):
     """min f(x) + lam ||x||_1 where f is smooth"""
 
     lam: float
 
-    @attr.frozen
+    @dataclass(frozen=True, slots=True)
     class SubDiff(ProximalGradOptimizable.SubDiff):
         _helper = UnconstrainedFuncSubDiffHelper()
 
@@ -35,12 +39,10 @@ class L1RegularizedOptimizable(ProximalGradOptimizable):
         """the regularization parameter"""
 
         def reduce_trafs(
-                self,
-                subg_slack: float, df_lb_thresh: float, norm_bound: float,
-                state: dict):
+            self, subg_slack: float, df_lb_thresh: float, norm_bound: float, state: dict
+        ):
             gc = l1_reg_subd(subg_slack, self.lam, self.g0, self.x0, self.pen)
-            return self._helper.reduce_with_min_grad(
-                gc, df_lb_thresh, norm_bound)
+            return self._helper.reduce_with_min_grad(gc, df_lb_thresh, norm_bound)
 
         def take_arbitrary(self):
             return self.g0 + np.sign(self.x0) * self.lam
@@ -48,8 +50,17 @@ class L1RegularizedOptimizable(ProximalGradOptimizable):
     def __init__(self, lam: float):
         self.lam = float(lam)
 
-    def eval(self, x: npt.NDArray, *, need_grad: bool=False) -> typing.Union[
-            float, tuple[float, "LassoRegression.SubDiff"]]:
+    @overload
+    def eval(self, x: npt.NDArray, *, need_grad: Literal[False] = False) -> float: ...
+
+    @overload
+    def eval(
+        self, x: npt.NDArray, *, need_grad: Literal[True]
+    ) -> tuple[float, SubDiff]: ...
+
+    def eval(
+        self, x: npt.NDArray, *, need_grad: bool = False
+    ) -> float | tuple[float, SubDiff]:
         pen = self.lam * np.abs(x)
         if not need_grad:
             return self.prox_f(x, need_grad=False) + pen.sum()
@@ -64,13 +75,14 @@ class L1RegularizedOptimizable(ProximalGradOptimizable):
     def prox_g(self, x: npt.NDArray):
         return self.lam * np.linalg.norm(x, ord=1)
 
-    def prox_minx(self, y: npt.NDArray, L: float) -> npt.NDArray:
+    def prox_minx(self, ynew: npt.NDArray, L: float) -> npt.NDArray:
         t = self.lam / L
-        return np.sign(y) * np.maximum(np.abs(y) - t, 0.)
+        return np.sign(ynew) * np.maximum(np.abs(ynew) - t, 0.0)
 
 
 class LassoRegression(L1RegularizedOptimizable, KnownLipschitzOptimizable):
     """min 1/2m ||Ax - b||^2 + lam ||x||_1"""
+
     A: npt.NDArray
     b: npt.NDArray
 
@@ -78,7 +90,7 @@ class LassoRegression(L1RegularizedOptimizable, KnownLipschitzOptimizable):
         super().__init__(lam)
         assert A.ndim == 2, A.shape
         m, n = A.shape
-        assert b.shape == (m, ), b.shape
+        assert b.shape == (m,), b.shape
         if x0 is None:
             x0 = np.zeros(n)
         else:
@@ -87,12 +99,22 @@ class LassoRegression(L1RegularizedOptimizable, KnownLipschitzOptimizable):
         self.b = b
         self.x0 = x0
 
-    def prox_f(self, x: npt.NDArray, *, need_grad: bool = False):
+    @overload
+    def prox_f(self, x: npt.NDArray, *, need_grad: Literal[False] = False) -> float: ...
+
+    @overload
+    def prox_f(
+        self, x: npt.NDArray, *, need_grad: Literal[True]
+    ) -> tuple[float, npt.NDArray]: ...
+
+    def prox_f(
+        self, x: npt.NDArray, *, need_grad: bool = False
+    ) -> float | tuple[float, npt.NDArray]:
         A = self.A
         m, _ = A.shape
         Ax = A @ x
         res = Ax - self.b
-        f = (1 / (m*2)) * np.dot(res, res)
+        f = (1 / (m * 2)) * np.dot(res, res)
         if not need_grad:
             return f
         else:
@@ -105,7 +127,7 @@ class LassoRegression(L1RegularizedOptimizable, KnownLipschitzOptimizable):
         AxT = x @ A.T  # (batch, m)
         res = AxT - self.b[np.newaxis]
         res2 = np.square(res, out=res)
-        return (1 / (m*2)) * np.sum(res2, axis=1)
+        return (1 / (m * 2)) * np.sum(res2, axis=1)
 
     def eval_cvx_params(self) -> LipschitzConstants:
         A = self.A
@@ -116,17 +138,21 @@ class LassoRegression(L1RegularizedOptimizable, KnownLipschitzOptimizable):
         L = eig[-1] * R
         alpha = np.abs(eig[0])
         beta = eig[-1]
-        return LipschitzConstants(float(self.eval(self.x0)), R, L, alpha, beta)
+        return LipschitzConstants(cast(float, self.eval(self.x0)), R, L, alpha, beta)
 
     def __repr__(self):
-        return (f'L1Reg(m={self.A.shape[0]},'
-                f' n={self.A.shape[1]}, lam={self.lam:.2g})')
+        return f"L1Reg(m={self.A.shape[0]}, n={self.A.shape[1]}, lam={self.lam:.2g})"
 
     @classmethod
-    def gen_random(cls, m: int, n: int, lam: float,
-                   sparsity=0.95, noise=0.05,
-                   rng: typing.Optional[np.random.Generator] = None
-                   ) -> tuple["LassoRegression", npt.NDArray]:
+    def gen_random(
+        cls,
+        m: int,
+        n: int,
+        lam: float,
+        sparsity=0.95,
+        noise=0.05,
+        rng: np.random.Generator | None = None,
+    ) -> tuple[LassoRegression, npt.NDArray]:
         """
         Generate a random Lasso problem
         :return: (problem, xtrue)
@@ -148,6 +174,7 @@ class LassoClassification(L1RegularizedOptimizable):
 
     Loss = -1/m (log sum exp (A_i x) - (A_i x)_{y_i}) + lam ||x||_1
     """
+
     A: npt.NDArray
     b: npt.NDArray
     nr_class: int
@@ -158,7 +185,7 @@ class LassoClassification(L1RegularizedOptimizable):
         super().__init__(lam)
         assert A.ndim == 2, A.shape
         m, n = A.shape
-        assert b.shape == (m, ), b.shape
+        assert b.shape == (m,), b.shape
         assert b.dtype == np.int32, b.dtype
         nr_class = b.max() + 1
         self.nr_class = nr_class
@@ -172,17 +199,26 @@ class LassoClassification(L1RegularizedOptimizable):
         self.x0 = x0
         self._m_arange = np.arange(m)
 
-    def prox_f(self, x: npt.NDArray, *, need_grad: bool = False):
+    @overload
+    def prox_f(self, x: npt.NDArray, *, need_grad: Literal[False] = False) -> float: ...
+
+    @overload
+    def prox_f(
+        self, x: npt.NDArray, *, need_grad: Literal[True]
+    ) -> tuple[float, npt.NDArray]: ...
+
+    def prox_f(
+        self, x: npt.NDArray, *, need_grad: bool = False
+    ) -> float | tuple[float, npt.NDArray]:
         A = self.A
         m, n = A.shape
-        Ax = A @ x.reshape(n, self.nr_class)    # (m, nr_class)
-        ce = (1/m) * (sps.logsumexp(Ax, axis=1) -
-                       Ax[self._m_arange, self.b]).sum()
+        Ax = A @ x.reshape(n, self.nr_class)  # (m, nr_class)
+        ce = (1 / m) * (sps.logsumexp(Ax, axis=1) - Ax[self._m_arange, self.b]).sum()
         if need_grad:
             # d[i, j, k] = Ax[i, k] - Ax[i, j]
             d = Ax[:, np.newaxis, :] - Ax[:, :, np.newaxis]
             # g0 is diff(loss, Ax)
-            g0 = (1 / m) / np.exp(d).sum(axis=2)    # (m, nr_class)
+            g0 = (1 / m) / np.exp(d).sum(axis=2)  # (m, nr_class)
             g0[self._m_arange, self.b] -= 1 / m
             grad = A.T @ g0
             return ce, grad.flatten()
@@ -196,19 +232,27 @@ class LassoClassification(L1RegularizedOptimizable):
         # Ax = np.einsum('mn, bnc -> bmc', A, x) # too slow
         xt = x.transpose((1, 0, 2)).reshape(n, batch * self.nr_class)
         Ax = (A @ xt).reshape(m, batch, self.nr_class)
-        Ax_b = Ax[self._m_arange, :, self.b]    # (m, batch)
-        ce = (1/m) * (sps.logsumexp(Ax, axis=2) - Ax_b).sum(axis=0)
+        Ax_b = Ax[self._m_arange, :, self.b]  # (m, batch)
+        ce = (1 / m) * (sps.logsumexp(Ax, axis=2) - Ax_b).sum(axis=0)
         return ce
 
     def __repr__(self):
-        return (f'L1Cls(m={self.A.shape[0]},'
-                f' n={self.A.shape[1]}, k={self.nr_class}, lam={self.lam:.2g})')
+        return (
+            f"L1Cls(m={self.A.shape[0]},"
+            f" n={self.A.shape[1]}, k={self.nr_class}, lam={self.lam:.2g})"
+        )
 
     @classmethod
-    def gen_random(cls, m: int, n: int, nr_class: int, lam: float,
-                   sparsity=0.95, noise=0.05,
-                   rng: typing.Optional[np.random.Generator] = None
-                   ) -> tuple["LassoClassification", npt.NDArray]:
+    def gen_random(
+        cls,
+        m: int,
+        n: int,
+        nr_class: int,
+        lam: float,
+        sparsity=0.95,
+        noise=0.05,
+        rng: np.random.Generator | None = None,
+    ) -> tuple[LassoClassification, npt.NDArray]:
         """:return: (problem, xtrue)"""
         if rng is None:
             rng = make_stable_rng(cls)
@@ -223,7 +267,8 @@ class LassoClassification(L1RegularizedOptimizable):
                 for j in range(i):
                     len_xj = np.linalg.norm(xtrue[:, j])
                     if np.abs(np.dot(xi, xtrue[:, j])) > (
-                            min_angle_cos * len_xi * len_xj):
+                        min_angle_cos * len_xi * len_xj
+                    ):
                         break
                 else:
                     xtrue[:, i] = xi
